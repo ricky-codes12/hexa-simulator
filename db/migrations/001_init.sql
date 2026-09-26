@@ -1,5 +1,14 @@
-CREATE TABLE IF NOT EXISTS todos (
+CREATE TABLE IF NOT EXISTS devices (
   id BIGSERIAL PRIMARY KEY,
-  title TEXT NOT NULL CHECK (length(trim(title)) > 0),
+  name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+  imei TEXT NOT NULL UNIQUE CHECK (length(trim(imei)) > 0),
+  model TEXT NOT NULL DEFAULT 'Teltonika FMC920',
+  status TEXT NOT NULL DEFAULT 'offline' CHECK (status IN ('online', 'offline')),
+  latitude DOUBLE PRECISION NOT NULL DEFAULT -6.2088,
+  longitude DOUBLE PRECISION NOT NULL DEFAULT 106.8456,
+  speed DOUBLE PRECISION NOT NULL DEFAULT 0,
+  heading DOUBLE PRECISION NOT NULL DEFAULT 0,
+  ignition BOOLEAN NOT NULL DEFAULT false,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
