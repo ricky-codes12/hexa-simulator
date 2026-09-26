@@ -59,3 +59,8 @@ func (s *Store) UpdateTelemetry(ctx context.Context, id int64, input httpapi.Tel
 	err := s.db.QueryRowContext(ctx, `UPDATE devices SET status=$2,latitude=$3,longitude=$4,speed=$5,heading=$6,ignition=$7,updated_at=now() WHERE id=$1 RETURNING id,name,imei,model,status,latitude,longitude,speed,heading,ignition,updated_at,created_at`, id, input.Status, input.Latitude, input.Longitude, input.Speed, input.Heading, input.Ignition).Scan(&d.ID, &d.Name, &d.IMEI, &d.Model, &d.Status, &d.Latitude, &d.Longitude, &d.Speed, &d.Heading, &d.Ignition, &d.UpdatedAt, &d.CreatedAt)
 	return d, err
 }
+
+func (s *Store) DeleteDevice(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM devices WHERE id=$1`, id)
+	return err
+}

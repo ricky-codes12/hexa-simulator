@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -45,6 +46,7 @@ type DeviceStore interface {
 	ListDevices(context.Context) ([]Device, error)
 	CreateDevice(context.Context, DeviceInput) (Device, error)
 	UpdateTelemetry(context.Context, int64, TelemetryInput) (Device, error)
+	DeleteDevice(context.Context, int64) error
 }
 
 type healthResponse struct {
@@ -122,12 +124,32 @@ func Handler(revision string, store DeviceStore, webRoot string) http.Handler {
 			writeError(writer, http.StatusBadRequest, "status must be online or offline")
 			return
 		}
+		if !validTelemetry(input) {
+			writeError(writer, http.StatusBadRequest, "telemetry values are outside supported ranges")
+			return
+		}
 		item, err := store.UpdateTelemetry(request.Context(), id, input)
 		if err != nil {
 			writeError(writer, http.StatusInternalServerError, "update telemetry")
 			return
 		}
 		writeJSON(writer, http.StatusOK, item)
+	})
+	mux.HandleFunc("DELETE /api/devices/{id}", func(writer http.ResponseWriter, request *http.Request) {
+		if store == nil {
+			writeError(writer, http.StatusServiceUnavailable, "PostgreSQL is not configured; set DATABASE_URL")
+			return
+		}
+		var id int64
+		if _, err := fmtSscan(request.PathValue("id"), &id); err != nil || id < 1 {
+			writeError(writer, http.StatusBadRequest, "invalid device id")
+			return
+		}
+		if err := store.DeleteDevice(request.Context(), id); err != nil {
+			writeError(writer, http.StatusInternalServerError, "delete device")
+			return
+		}
+		writer.WriteHeader(http.StatusNoContent)
 	})
 	if strings.TrimSpace(webRoot) != "" {
 		root := filepath.Clean(webRoot)
@@ -147,6 +169,19 @@ func Handler(revision string, store DeviceStore, webRoot string) http.Handler {
 		})
 	}
 	return mux
+}
+
+func validTelemetry(input TelemetryInput) bool {
+	values := []float64{input.Latitude, input.Longitude, input.Speed, input.Heading}
+	for _, value := range values {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return false
+		}
+	}
+	return input.Latitude >= -90 && input.Latitude <= 90 &&
+		input.Longitude >= -180 && input.Longitude <= 180 &&
+		input.Speed >= 0 && input.Speed <= 400 &&
+		input.Heading >= 0 && input.Heading < 360
 }
 
 func fmtSscan(value string, target *int64) (int, error) {
