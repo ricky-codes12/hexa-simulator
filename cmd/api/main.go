@@ -40,7 +40,7 @@ func serve() {
 		address = "127.0.0.1:8080"
 	}
 	ctx := context.Background()
-	var store apphttp.TodoStore
+	var store apphttp.DeviceStore
 	if databaseURL := os.Getenv("DATABASE_URL"); databaseURL != "" {
 		postgres, err := postgresstore.Open(ctx, databaseURL)
 		if err != nil {

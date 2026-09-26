@@ -10,16 +10,41 @@ import (
 	"time"
 )
 
-type Todo struct {
+type Device struct {
 	ID        int64     `json:"id"`
-	Title     string    `json:"title"`
+	Name      string    `json:"name"`
+	IMEI      string    `json:"imei"`
+	Model     string    `json:"model"`
+	Status    string    `json:"status"`
+	Latitude  float64   `json:"latitude"`
+	Longitude float64   `json:"longitude"`
+	Speed     float64   `json:"speed"`
+	Heading   float64   `json:"heading"`
+	Ignition  bool      `json:"ignition"`
+	UpdatedAt time.Time `json:"updated_at"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
-type TodoStore interface {
+type DeviceInput struct {
+	Name  string `json:"name"`
+	IMEI  string `json:"imei"`
+	Model string `json:"model"`
+}
+
+type TelemetryInput struct {
+	Status    string  `json:"status"`
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+	Speed     float64 `json:"speed"`
+	Heading   float64 `json:"heading"`
+	Ignition  bool    `json:"ignition"`
+}
+
+type DeviceStore interface {
 	Ping(context.Context) error
-	List(context.Context) ([]Todo, error)
-	Create(context.Context, string) (Todo, error)
+	ListDevices(context.Context) ([]Device, error)
+	CreateDevice(context.Context, DeviceInput) (Device, error)
+	UpdateTelemetry(context.Context, int64, TelemetryInput) (Device, error)
 }
 
 type healthResponse struct {
@@ -28,7 +53,7 @@ type healthResponse struct {
 	DatabaseReady      bool   `json:"database_ready"`
 }
 
-func Handler(revision string, store TodoStore, webRoot string) http.Handler {
+func Handler(revision string, store DeviceStore, webRoot string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(writer http.ResponseWriter, request *http.Request) {
 		ready := false
@@ -41,36 +66,68 @@ func Handler(revision string, store TodoStore, webRoot string) http.Handler {
 		}
 		writeJSON(writer, status, healthResponse{Revision: revision, DatabaseConfigured: store != nil, DatabaseReady: ready})
 	})
-	mux.HandleFunc("GET /api/todos", func(writer http.ResponseWriter, request *http.Request) {
+	mux.HandleFunc("GET /api/devices", func(writer http.ResponseWriter, request *http.Request) {
 		if store == nil {
 			writeError(writer, http.StatusServiceUnavailable, "PostgreSQL is not configured; set DATABASE_URL")
 			return
 		}
-		items, err := store.List(request.Context())
+		items, err := store.ListDevices(request.Context())
 		if err != nil {
-			writeError(writer, http.StatusInternalServerError, "load todos")
+			writeError(writer, http.StatusInternalServerError, "load devices")
 			return
 		}
 		writeJSON(writer, http.StatusOK, map[string]any{"items": items})
 	})
-	mux.HandleFunc("POST /api/todos", func(writer http.ResponseWriter, request *http.Request) {
+	mux.HandleFunc("POST /api/devices", func(writer http.ResponseWriter, request *http.Request) {
 		if store == nil {
 			writeError(writer, http.StatusServiceUnavailable, "PostgreSQL is not configured; set DATABASE_URL")
 			return
 		}
-		var input struct {
-			Title string `json:"title"`
-		}
-		if err := json.NewDecoder(request.Body).Decode(&input); err != nil || strings.TrimSpace(input.Title) == "" {
-			writeError(writer, http.StatusBadRequest, "title is required")
+		var input DeviceInput
+		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+			writeError(writer, http.StatusBadRequest, "invalid device payload")
 			return
 		}
-		item, err := store.Create(request.Context(), strings.TrimSpace(input.Title))
+		input.Name, input.IMEI, input.Model = strings.TrimSpace(input.Name), strings.TrimSpace(input.IMEI), strings.TrimSpace(input.Model)
+		if input.Name == "" || input.IMEI == "" {
+			writeError(writer, http.StatusBadRequest, "name and imei are required")
+			return
+		}
+		if input.Model == "" {
+			input.Model = "Teltonika FMC920"
+		}
+		item, err := store.CreateDevice(request.Context(), input)
 		if err != nil {
-			writeError(writer, http.StatusInternalServerError, "create todo")
+			writeError(writer, http.StatusInternalServerError, "create device")
 			return
 		}
 		writeJSON(writer, http.StatusCreated, item)
+	})
+	mux.HandleFunc("POST /api/devices/{id}/telemetry", func(writer http.ResponseWriter, request *http.Request) {
+		if store == nil {
+			writeError(writer, http.StatusServiceUnavailable, "PostgreSQL is not configured; set DATABASE_URL")
+			return
+		}
+		var id int64
+		if _, err := fmtSscan(request.PathValue("id"), &id); err != nil || id < 1 {
+			writeError(writer, http.StatusBadRequest, "invalid device id")
+			return
+		}
+		var input TelemetryInput
+		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+			writeError(writer, http.StatusBadRequest, "invalid telemetry payload")
+			return
+		}
+		if input.Status != "online" && input.Status != "offline" {
+			writeError(writer, http.StatusBadRequest, "status must be online or offline")
+			return
+		}
+		item, err := store.UpdateTelemetry(request.Context(), id, input)
+		if err != nil {
+			writeError(writer, http.StatusInternalServerError, "update telemetry")
+			return
+		}
+		writeJSON(writer, http.StatusOK, item)
 	})
 	if strings.TrimSpace(webRoot) != "" {
 		root := filepath.Clean(webRoot)
@@ -92,12 +149,30 @@ func Handler(revision string, store TodoStore, webRoot string) http.Handler {
 	return mux
 }
 
+func fmtSscan(value string, target *int64) (int, error) {
+	var parsed int64
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return 0, &parseError{}
+		}
+		parsed = parsed*10 + int64(r-'0')
+	}
+	if value == "" {
+		return 0, &parseError{}
+	}
+	*target = parsed
+	return 1, nil
+}
+
+type parseError struct{}
+
+func (*parseError) Error() string { return "invalid integer" }
+
 func writeJSON(writer http.ResponseWriter, status int, value any) {
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(status)
 	_ = json.NewEncoder(writer).Encode(value)
 }
-
 func writeError(writer http.ResponseWriter, status int, message string) {
 	writeJSON(writer, status, map[string]string{"error": message})
 }

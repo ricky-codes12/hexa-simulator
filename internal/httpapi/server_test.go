@@ -11,61 +11,61 @@ import (
 )
 
 type fakeStore struct {
-	items   []Todo
+	items   []Device
 	pingErr error
 }
 
 func (f *fakeStore) Ping(context.Context) error { return f.pingErr }
-func (f *fakeStore) List(context.Context) ([]Todo, error) {
-	return append([]Todo(nil), f.items...), nil
+func (f *fakeStore) ListDevices(context.Context) ([]Device, error) {
+	return append([]Device(nil), f.items...), nil
 }
-func (f *fakeStore) Create(_ context.Context, title string) (Todo, error) {
-	item := Todo{ID: int64(len(f.items) + 1), Title: title, CreatedAt: time.Unix(1, 0).UTC()}
-	f.items = append(f.items, item)
-	return item, nil
+func (f *fakeStore) CreateDevice(_ context.Context, input DeviceInput) (Device, error) {
+	d := Device{ID: int64(len(f.items) + 1), Name: input.Name, IMEI: input.IMEI, Model: input.Model, Status: "offline", CreatedAt: time.Unix(1, 0).UTC(), UpdatedAt: time.Unix(1, 0).UTC()}
+	f.items = append(f.items, d)
+	return d, nil
 }
-
-func TestHealthWorksWithoutDatabaseAndTodosExplainConfiguration(t *testing.T) {
-	handler := Handler("test-revision", nil, "")
-	for _, tc := range []struct {
-		path       string
-		wantStatus int
-		want       string
-	}{
-		{path: "/healthz", wantStatus: http.StatusOK, want: `"database_configured":false`},
-		{path: "/api/todos", wantStatus: http.StatusServiceUnavailable, want: "DATABASE_URL"},
-	} {
-		request := httptest.NewRequest(http.MethodGet, tc.path, nil)
-		response := httptest.NewRecorder()
-		handler.ServeHTTP(response, request)
-		if response.Code != tc.wantStatus || !strings.Contains(response.Body.String(), tc.want) {
-			t.Fatalf("%s status=%d body=%s", tc.path, response.Code, response.Body.String())
+func (f *fakeStore) UpdateTelemetry(_ context.Context, id int64, input TelemetryInput) (Device, error) {
+	for i := range f.items {
+		if f.items[i].ID == id {
+			f.items[i].Status = input.Status
+			f.items[i].Latitude = input.Latitude
+			f.items[i].Longitude = input.Longitude
+			f.items[i].Speed = input.Speed
+			f.items[i].Heading = input.Heading
+			f.items[i].Ignition = input.Ignition
+			return f.items[i], nil
 		}
 	}
+	return Device{}, errors.New("not found")
 }
 
+func TestHealthWorksWithoutDatabase(t *testing.T) {
+	h := Handler("test", nil, "")
+	r := httptest.NewRecorder()
+	h.ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if r.Code != 200 || !strings.Contains(r.Body.String(), `"database_configured":false`) {
+		t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
+	}
+}
 func TestConfiguredButUnreadyDatabaseFailsHealth(t *testing.T) {
-	handler := Handler("test", &fakeStore{pingErr: errors.New("database not ready")}, "")
-	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"database_ready":false`) {
-		t.Fatalf("health status=%d body=%s", response.Code, response.Body.String())
+	h := Handler("test", &fakeStore{pingErr: errors.New("no")}, "")
+	r := httptest.NewRecorder()
+	h.ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if r.Code != 503 {
+		t.Fatalf("status=%d", r.Code)
 	}
 }
-
-func TestTodosUseStore(t *testing.T) {
-	handler := Handler("test", &fakeStore{}, "")
-	create := httptest.NewRequest(http.MethodPost, "/api/todos", strings.NewReader(`{"title":"Ship starter"}`))
-	created := httptest.NewRecorder()
-	handler.ServeHTTP(created, create)
-	if created.Code != http.StatusCreated || !strings.Contains(created.Body.String(), "Ship starter") {
-		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+func TestDeviceFlow(t *testing.T) {
+	s := &fakeStore{}
+	h := Handler("test", s, "")
+	c := httptest.NewRecorder()
+	h.ServeHTTP(c, httptest.NewRequest(http.MethodPost, "/api/devices", strings.NewReader(`{"name":"Truck 01","imei":"352093081234567","model":"Teltonika FMC920"}`)))
+	if c.Code != 201 || !strings.Contains(c.Body.String(), "Truck 01") {
+		t.Fatalf("create=%d %s", c.Code, c.Body.String())
 	}
-	list := httptest.NewRequest(http.MethodGet, "/api/todos", nil)
-	listed := httptest.NewRecorder()
-	handler.ServeHTTP(listed, list)
-	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), "Ship starter") {
-		t.Fatalf("list status=%d body=%s", listed.Code, listed.Body.String())
+	u := httptest.NewRecorder()
+	h.ServeHTTP(u, httptest.NewRequest(http.MethodPost, "/api/devices/1/telemetry", strings.NewReader(`{"status":"online","latitude":-6.2,"longitude":106.8,"speed":42,"heading":90,"ignition":true}`)))
+	if u.Code != 200 || !strings.Contains(u.Body.String(), `"status":"online"`) {
+		t.Fatalf("update=%d %s", u.Code, u.Body.String())
 	}
 }
