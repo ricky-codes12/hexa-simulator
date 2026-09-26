@@ -41,6 +41,10 @@ type TelemetryInput struct {
 	Ignition  bool    `json:"ignition"`
 }
 
+type TelemetryForwarder interface {
+	ForwardTelemetry(context.Context, Device) error
+}
+
 type DeviceStore interface {
 	Ping(context.Context) error
 	ListDevices(context.Context) ([]Device, error)
@@ -55,7 +59,7 @@ type healthResponse struct {
 	DatabaseReady      bool   `json:"database_ready"`
 }
 
-func Handler(revision string, store DeviceStore, webRoot string) http.Handler {
+func Handler(revision string, store DeviceStore, webRoot string, forwarders ...TelemetryForwarder) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(writer http.ResponseWriter, request *http.Request) {
 		ready := false
@@ -132,6 +136,17 @@ func Handler(revision string, store DeviceStore, webRoot string) http.Handler {
 		if err != nil {
 			writeError(writer, http.StatusInternalServerError, "update telemetry")
 			return
+		}
+		if item.Status == "online" {
+			for _, forwarder := range forwarders {
+				if forwarder == nil {
+					continue
+				}
+				if err := forwarder.ForwardTelemetry(request.Context(), item); err != nil {
+					writeError(writer, http.StatusBadGateway, "forward telemetry to Teltonika gateway: "+err.Error())
+					return
+				}
+			}
 		}
 		writeJSON(writer, http.StatusOK, item)
 	})

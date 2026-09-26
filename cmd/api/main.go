@@ -12,6 +12,7 @@ import (
 
 	apphttp "hexa-simulator/internal/httpapi"
 	"hexa-simulator/internal/postgresstore"
+	"hexa-simulator/internal/teltonika"
 )
 
 var revision = "dev"
@@ -50,9 +51,13 @@ func serve() {
 		defer postgres.Close()
 		store = postgres
 	}
+	var forwarders []apphttp.TelemetryForwarder
+	if gatewayAddress := os.Getenv("TELTONIKA_GATEWAY_ADDR"); gatewayAddress != "" {
+		forwarders = append(forwarders, teltonikaForwarder{client: teltonika.Client{Address: gatewayAddress, Timeout: gatewayTimeout()}})
+	}
 	server := &http.Server{
 		Addr:              address,
-		Handler:           apphttp.Handler(revision, store, os.Getenv("WEB_ROOT")),
+		Handler:           apphttp.Handler(revision, store, os.Getenv("WEB_ROOT"), forwarders...),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -63,7 +68,7 @@ func serve() {
 		defer cancel()
 		_ = server.Shutdown(shutdown)
 	}()
-	fmt.Printf("listening: http://%s revision=%s database=%t\n", address, revision, store != nil)
+	fmt.Printf("listening: http://%s revision=%s database=%t teltonika_gateway=%t\n", address, revision, store != nil, len(forwarders) > 0)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -86,4 +91,26 @@ func health(args []string) {
 		os.Exit(1)
 	}
 	fmt.Println("healthy")
+}
+
+type teltonikaForwarder struct{ client teltonika.Client }
+
+func (f teltonikaForwarder) ForwardTelemetry(ctx context.Context, device apphttp.Device) error {
+	return f.client.Send(ctx, teltonika.Telemetry{
+		IMEI: device.IMEI, Timestamp: device.UpdatedAt, Latitude: device.Latitude, Longitude: device.Longitude,
+		Speed: device.Speed, Heading: device.Heading, Ignition: device.Ignition,
+	})
+}
+
+func gatewayTimeout() time.Duration {
+	value := os.Getenv("TELTONIKA_GATEWAY_TIMEOUT")
+	if value == "" {
+		return 5 * time.Second
+	}
+	timeout, err := time.ParseDuration(value)
+	if err != nil || timeout <= 0 {
+		fmt.Fprintf(os.Stderr, "invalid TELTONIKA_GATEWAY_TIMEOUT %q; using 5s\n", value)
+		return 5 * time.Second
+	}
+	return timeout
 }
