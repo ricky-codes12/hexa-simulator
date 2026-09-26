@@ -5,8 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 
-	"hexa-simulator/internal/httpapi"
 	_ "github.com/lib/pq"
+	"hexa-simulator/internal/httpapi"
 )
 
 type Store struct{ db *sql.DB }
