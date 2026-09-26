@@ -34,17 +34,16 @@ The gateway address and timeout are external configuration (`TELTONIKA_GATEWAY_A
 
 
 
-## HEXA.SENSOR pull integration
+## HEXA.SENSOR HTTP Push integration
 
-The agreed application integration is pull-based:
+The application integration is push-based:
 
 ~~~text
-HEXA.SENSOR -> HTTP GET /api/integration/devices + X-SECRET-KEY -> hexa-simulator
-            <- JSON device + latest telemetry state                 <-
+hexa-simulator -> HTTP POST + Bearer ingest key -> HEXA.SENSOR HTTP Push connector
 ~~~
 
-HEXA.SENSOR initiates the request and hexa-simulator is the data provider. The endpoint returns the same persisted `Device` representation used by the simulator, including IMEI, status, latitude, longitude, speed, heading, ignition, and timestamps. This keeps the integration generic so HEXA.SENSOR can apply its own mapping/rules.
+For each persisted **online** telemetry update, hexa-simulator can POST one `hexa.sensor/telemetry/v1` record to `SIM_SENSOR_PUSH_URL`. The virtual device IMEI maps to `device.hardware_id`; persisted timestamp maps to `device_time`; latitude, longitude, speed and heading map to `position`; and ignition plus derived movement (`speed > 0`) map to `attributes`. `position.fix_valid` is true for the simulator's validated deterministic route samples.
 
-The inbound `X-SECRET-KEY` value is compared with `HEXA_SENSOR_SECRET_KEY` from protected environment configuration. If the secret is absent, the integration endpoint fails closed with HTTP 503; missing or incorrect request credentials receive HTTP 401. The browser-facing `/api/devices` endpoint remains unchanged for the simulator UI.
+`SIM_SENSOR_PUSH_URL` and `SIM_SENSOR_PUSH_KEY` must be configured together in protected environment configuration. The key is sent only as `Authorization: Bearer <key>` and is never committed. `SIM_SENSOR_PUSH_TIMEOUT` defaults to five seconds. Non-2xx responses, network errors and timeouts are surfaced through the telemetry API as forwarding failures so a broken demo integration is visible.
 
-The previous project-owned TCP-to-HTTP forwarding Gateway is intentionally removed: the simulator no longer needs a HEXA.SENSOR URL and does not push telemetry to HEXA.SENSOR. Optional Teltonika TCP output through `TELTONIKA_GATEWAY_ADDR` remains an independent protocol-testing feature.
+When HTTP Push configuration is absent, standalone simulator behavior is unchanged. Optional Teltonika TCP output through `TELTONIKA_GATEWAY_ADDR` remains an independent protocol-testing feature and may be enabled alongside HTTP Push.

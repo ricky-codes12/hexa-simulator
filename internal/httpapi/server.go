@@ -59,7 +59,7 @@ type healthResponse struct {
 	DatabaseReady      bool   `json:"database_ready"`
 }
 
-func Handler(revision string, store DeviceStore, webRoot string, integrationSecret string, forwarders ...TelemetryForwarder) http.Handler {
+func Handler(revision string, store DeviceStore, webRoot string, forwarders ...TelemetryForwarder) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(writer http.ResponseWriter, request *http.Request) {
 		ready := false
@@ -71,26 +71,6 @@ func Handler(revision string, store DeviceStore, webRoot string, integrationSecr
 			}
 		}
 		writeJSON(writer, status, healthResponse{Revision: revision, DatabaseConfigured: store != nil, DatabaseReady: ready})
-	})
-	mux.HandleFunc("GET /api/integration/devices", func(writer http.ResponseWriter, request *http.Request) {
-		if strings.TrimSpace(integrationSecret) == "" {
-			writeError(writer, http.StatusServiceUnavailable, "integration API is not configured")
-			return
-		}
-		if request.Header.Get("X-SECRET-KEY") != integrationSecret {
-			writeError(writer, http.StatusUnauthorized, "unauthorized")
-			return
-		}
-		if store == nil {
-			writeError(writer, http.StatusServiceUnavailable, "PostgreSQL is not configured; set DATABASE_URL")
-			return
-		}
-		items, err := store.ListDevices(request.Context())
-		if err != nil {
-			writeError(writer, http.StatusInternalServerError, "load devices")
-			return
-		}
-		writeJSON(writer, http.StatusOK, map[string]any{"items": items})
 	})
 	mux.HandleFunc("GET /api/devices", func(writer http.ResponseWriter, request *http.Request) {
 		if store == nil {
@@ -163,7 +143,7 @@ func Handler(revision string, store DeviceStore, webRoot string, integrationSecr
 					continue
 				}
 				if err := forwarder.ForwardTelemetry(request.Context(), item); err != nil {
-					writeError(writer, http.StatusBadGateway, "forward telemetry to Teltonika gateway: "+err.Error())
+					writeError(writer, http.StatusBadGateway, "forward telemetry: "+err.Error())
 					return
 				}
 			}

@@ -12,8 +12,8 @@ Hexa Simulator is a Hexa.Build-native Svelte + Go + PostgreSQL application for d
 - A page reload resumes the browser simulation clock for devices persisted as online.
 - Telemetry input is range-validated by the API.
 - Optional backend-first Teltonika TCP output: when `TELTONIKA_GATEWAY_ADDR` is configured, online telemetry is encoded as Codec 8 Extended (`0x8E`) with an IMEI handshake, CRC-16/IBM, and AVL acknowledgement validation before the API reports success.
-- HEXA.SENSOR pull integration: `GET /api/integration/devices` exposes the current device + latest telemetry state and requires the `X-SECRET-KEY` request header.
-- The integration secret is never hardcoded; `HEXA_SENSOR_SECRET_KEY` remains protected runtime configuration.
+- HEXA.SENSOR HTTP Push integration: each persisted online telemetry update can be POSTed to the configured Hexa.Sensor ingest endpoint using the `hexa.sensor/telemetry/v1` schema and Bearer authentication.
+- The integration secret is never hardcoded; `SIM_SENSOR_PUSH_KEY` remains protected runtime configuration.
 
 ## Start here
 
@@ -28,8 +28,8 @@ The web UI is served by Vite at `http://127.0.0.1:5173` during development and p
 
 Read `AGENTS.md` and `docs/architecture/ARCHITECTURE.md` before extending the project.
 
-## HEXA.SENSOR pull integration
+## HEXA.SENSOR HTTP Push integration
 
-HEXA.SENSOR is the HTTP client for this integration. It polls `GET /api/integration/devices` on hexa-simulator and sends `X-SECRET-KEY` with the value configured in the simulator's protected `HEXA_SENSOR_SECRET_KEY` environment variable. The response is JSON with an `items` array containing each device and its latest persisted telemetry fields.
+hexa-simulator is the HTTP client for this integration. For each persisted online telemetry update it POSTs `hexa.sensor/telemetry/v1` JSON to `SIM_SENSOR_PUSH_URL` and authenticates with `Authorization: Bearer <SIM_SENSOR_PUSH_KEY>`. Configure both values only in protected environment configuration.
 
-No HEXA.SENSOR URL is required by the simulator and the simulator does not POST telemetry to HEXA.SENSOR. The existing optional Teltonika TCP client remains available independently through `TELTONIKA_GATEWAY_ADDR` for protocol-level testing against an external compatible Gateway.
+The HTTP Push integration is optional: when `SIM_SENSOR_PUSH_URL` and `SIM_SENSOR_PUSH_KEY` are both absent, standalone simulator behavior is unchanged. The existing optional Teltonika TCP client remains available independently through `TELTONIKA_GATEWAY_ADDR` for protocol-level testing against an external compatible Gateway.

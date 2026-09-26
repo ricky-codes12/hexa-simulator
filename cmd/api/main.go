@@ -12,6 +12,7 @@ import (
 
 	apphttp "hexa-simulator/internal/httpapi"
 	"hexa-simulator/internal/postgresstore"
+	"hexa-simulator/internal/sensorpush"
 	"hexa-simulator/internal/teltonika"
 )
 
@@ -53,13 +54,22 @@ func serve() {
 		store = postgres
 	}
 	gatewayAddress := os.Getenv("TELTONIKA_GATEWAY_ADDR")
+	pushURL := os.Getenv("SIM_SENSOR_PUSH_URL")
+	pushKey := os.Getenv("SIM_SENSOR_PUSH_KEY")
 	var forwarders []apphttp.TelemetryForwarder
 	if gatewayAddress != "" {
 		forwarders = append(forwarders, teltonikaForwarder{client: teltonika.Client{Address: gatewayAddress, Timeout: gatewayTimeout()}})
 	}
+	if pushURL != "" || pushKey != "" {
+		if pushURL == "" || pushKey == "" {
+			fmt.Fprintln(os.Stderr, "SIM_SENSOR_PUSH_URL and SIM_SENSOR_PUSH_KEY must be configured together")
+			os.Exit(1)
+		}
+		forwarders = append(forwarders, sensorPushForwarder{client: sensorpush.Client{URL: pushURL, Key: pushKey, Timeout: sensorPushTimeout()}})
+	}
 	server := &http.Server{
 		Addr:              address,
-		Handler:           apphttp.Handler(revision, store, os.Getenv("WEB_ROOT"), os.Getenv("HEXA_SENSOR_SECRET_KEY"), forwarders...),
+		Handler:           apphttp.Handler(revision, store, os.Getenv("WEB_ROOT"), forwarders...),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {
@@ -68,7 +78,7 @@ func serve() {
 		defer cancel()
 		_ = server.Shutdown(shutdown)
 	}()
-	fmt.Printf("listening: http://%s revision=%s database=%t teltonika_gateway=%t integration_api=%t\n", address, revision, store != nil, len(forwarders) > 0, os.Getenv("HEXA_SENSOR_SECRET_KEY") != "")
+	fmt.Printf("listening: http://%s revision=%s database=%t teltonika_gateway=%t sensor_push=%t\n", address, revision, store != nil, gatewayAddress != "", pushURL != "")
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -110,6 +120,28 @@ func gatewayTimeout() time.Duration {
 	timeout, err := time.ParseDuration(value)
 	if err != nil || timeout <= 0 {
 		fmt.Fprintf(os.Stderr, "invalid TELTONIKA_GATEWAY_TIMEOUT %q; using 5s\n", value)
+		return 5 * time.Second
+	}
+	return timeout
+}
+
+type sensorPushForwarder struct{ client sensorpush.Client }
+
+func (f sensorPushForwarder) ForwardTelemetry(ctx context.Context, device apphttp.Device) error {
+	return f.client.Send(ctx, sensorpush.Telemetry{
+		HardwareID: device.IMEI, DeviceTime: device.UpdatedAt, Latitude: device.Latitude, Longitude: device.Longitude,
+		Speed: device.Speed, Heading: device.Heading, Ignition: device.Ignition, Movement: device.Speed > 0,
+	})
+}
+
+func sensorPushTimeout() time.Duration {
+	value := os.Getenv("SIM_SENSOR_PUSH_TIMEOUT")
+	if value == "" {
+		return 5 * time.Second
+	}
+	timeout, err := time.ParseDuration(value)
+	if err != nil || timeout <= 0 {
+		fmt.Fprintf(os.Stderr, "invalid SIM_SENSOR_PUSH_TIMEOUT %q; using 5s\n", value)
 		return 5 * time.Second
 	}
 	return timeout
