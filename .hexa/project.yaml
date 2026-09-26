@@ -5,3 +5,4 @@ environment:
   pass:
     - DATABASE_URL
     - TEST_DATABASE_URL
+    - RUNTIME_ENV_FILE
