@@ -6,7 +6,8 @@ Hexa Simulator is a Hexa.Build-native Svelte + Go + PostgreSQL application for d
 
 - Device-only simulator workspace with Hexa-styled dark UI.
 - Register and delete virtual GPS devices using a name, IMEI/device ID, and model.
-- Start/stop a simulation from the device list or detail panel.
+- Start/stop a simulation from the device list or live detail panel.
+- Inspect a dependency-free live route map with a moving, heading-aware vehicle marker plus speed, ignition, coordinates, and last-telemetry time.
 - Online devices emit deterministic Jakarta route telemetry every three seconds (position, speed, heading, ignition) through the Go API and persist the latest state in PostgreSQL.
 - A page reload resumes the browser simulation clock for devices persisted as online.
 - Telemetry input is range-validated by the API.
