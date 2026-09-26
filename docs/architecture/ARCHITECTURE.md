@@ -33,18 +33,18 @@ The simulator now has an optional backend Teltonika TCP output boundary. When `T
 The gateway address and timeout are external configuration (`TELTONIKA_GATEWAY_ADDR`, `TELTONIKA_GATEWAY_TIMEOUT`); no downstream address or credential is committed. With no gateway address configured, standalone simulator behavior is unchanged. The current adapter opens a TCP connection for each telemetry sample, which is intentionally simple and deterministic for integration testing; connection pooling/session persistence can be introduced after the target Gateway behavior is known. This does **not** claim an APSS Tensor application contract, UDP support, or every Teltonika IO element. The current wire contract is the documented Teltonika TCP + Codec 8 Extended subset needed to expose simulator GPS, speed, heading, timestamp, and ignition telemetry to a compatible Gateway.
 
 
-## Project-owned Teltonika Gateway
 
-The application can now close the integration loop without physical tracker hardware:
+## HEXA.SENSOR pull integration
+
+The agreed application integration is pull-based:
 
 ~~~text
-Simulator telemetry -> Teltonika TCP client -> project Gateway listener
-  -> IMEI handshake -> Codec 8E decode/validation -> normalized JSON
-  -> HTTP POST + X-SECRET-KEY -> HEXA.SENSOR
+HEXA.SENSOR -> HTTP GET /api/integration/devices + X-SECRET-KEY -> hexa-simulator
+            <- JSON device + latest telemetry state                 <-
 ~~~
 
-`TELTONIKA_GATEWAY_LISTEN` enables the project-owned TCP server. When enabled, `HEXA_SENSOR_URL` and `HEXA_SENSOR_SECRET_KEY` are required. If `TELTONIKA_GATEWAY_ADDR` is unset, the simulator client automatically targets the listener's bound address. This preserves the existing option to target an external Teltonika-compatible Gateway by setting `TELTONIKA_GATEWAY_ADDR` explicitly.
+HEXA.SENSOR initiates the request and hexa-simulator is the data provider. The endpoint returns the same persisted `Device` representation used by the simulator, including IMEI, status, latitude, longitude, speed, heading, ignition, and timestamps. This keeps the integration generic so HEXA.SENSOR can apply its own mapping/rules.
 
-The listener accepts the same one-record Codec 8 Extended subset that the simulator emits, validates the packet CRC and IO layout, decodes GPS/speed/heading/ignition, forwards normalized JSON, and only acknowledges the AVL record after HEXA.SENSOR returns a 2xx response. A downstream HTTP failure therefore propagates back through the Teltonika client and the simulator API instead of producing a false successful demo.
+The inbound `X-SECRET-KEY` value is compared with `HEXA_SENSOR_SECRET_KEY` from protected environment configuration. If the secret is absent, the integration endpoint fails closed with HTTP 503; missing or incorrect request credentials receive HTTP 401. The browser-facing `/api/devices` endpoint remains unchanged for the simulator UI.
 
-Secrets remain outside Git. Runtime loads `HEXA_SENSOR_SECRET_KEY` from the protected Runtime environment file via systemd's EnvironmentFile support rather than placing the secret value in process command arguments. The current normalized contract deliberately excludes fuel because no fuel IO value exists in the current simulator Codec 8E record.
+The previous project-owned TCP-to-HTTP forwarding Gateway is intentionally removed: the simulator no longer needs a HEXA.SENSOR URL and does not push telemetry to HEXA.SENSOR. Optional Teltonika TCP output through `TELTONIKA_GATEWAY_ADDR` remains an independent protocol-testing feature.
