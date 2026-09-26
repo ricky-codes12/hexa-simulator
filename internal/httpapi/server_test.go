@@ -24,6 +24,15 @@ func (f *fakeStore) CreateDevice(_ context.Context, input DeviceInput) (Device, 
 	f.items = append(f.items, d)
 	return d, nil
 }
+func (f *fakeStore) DeleteDevice(_ context.Context, id int64) error {
+	for i := range f.items {
+		if f.items[i].ID == id {
+			f.items = append(f.items[:i], f.items[i+1:]...)
+			return nil
+		}
+	}
+	return errors.New("not found")
+}
 func (f *fakeStore) UpdateTelemetry(_ context.Context, id int64, input TelemetryInput) (Device, error) {
 	for i := range f.items {
 		if f.items[i].ID == id {
@@ -67,5 +76,32 @@ func TestDeviceFlow(t *testing.T) {
 	h.ServeHTTP(u, httptest.NewRequest(http.MethodPost, "/api/devices/1/telemetry", strings.NewReader(`{"status":"online","latitude":-6.2,"longitude":106.8,"speed":42,"heading":90,"ignition":true}`)))
 	if u.Code != 200 || !strings.Contains(u.Body.String(), `"status":"online"`) {
 		t.Fatalf("update=%d %s", u.Code, u.Body.String())
+	}
+}
+
+func TestTelemetryValidation(t *testing.T) {
+	s := &fakeStore{items: []Device{{ID: 1, Name: "Truck", IMEI: "1", Status: "offline"}}}
+	h := Handler("test", s, "")
+	for _, payload := range []string{
+		`{"status":"online","latitude":91,"longitude":106.8,"speed":42,"heading":90,"ignition":true}`,
+		`{"status":"online","latitude":-6.2,"longitude":181,"speed":42,"heading":90,"ignition":true}`,
+		`{"status":"online","latitude":-6.2,"longitude":106.8,"speed":-1,"heading":90,"ignition":true}`,
+		`{"status":"online","latitude":-6.2,"longitude":106.8,"speed":42,"heading":360,"ignition":true}`,
+	} {
+		r := httptest.NewRecorder()
+		h.ServeHTTP(r, httptest.NewRequest(http.MethodPost, "/api/devices/1/telemetry", strings.NewReader(payload)))
+		if r.Code != http.StatusBadRequest {
+			t.Fatalf("payload=%s status=%d body=%s", payload, r.Code, r.Body.String())
+		}
+	}
+}
+
+func TestDeleteDevice(t *testing.T) {
+	s := &fakeStore{items: []Device{{ID: 1, Name: "Truck", IMEI: "1", Status: "offline"}}}
+	h := Handler("test", s, "")
+	r := httptest.NewRecorder()
+	h.ServeHTTP(r, httptest.NewRequest(http.MethodDelete, "/api/devices/1", nil))
+	if r.Code != http.StatusNoContent || len(s.items) != 0 {
+		t.Fatalf("status=%d items=%d body=%s", r.Code, len(s.items), r.Body.String())
 	}
 }
