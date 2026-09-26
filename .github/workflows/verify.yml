@@ -1,0 +1,38 @@
+name: verify
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17-bookworm
+        env:
+          POSTGRES_DB: starter_ci
+          POSTGRES_USER: starter_ci
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U starter_ci -d starter_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgres://starter_ci@127.0.0.1:5432/starter_ci?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: |
+          export BUN_INSTALL="$HOME/.bun"
+          curl -fsSL https://bun.com/install | bash -s "bun-v1.3.14"
+          echo "$BUN_INSTALL/bin" >> "$GITHUB_PATH"
+      - run: test "$(bun --version)" = "1.3.14"
+      - run: ./scripts/setup.sh
+      - run: ./scripts/verify.sh

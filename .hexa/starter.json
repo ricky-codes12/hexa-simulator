@@ -1,0 +1,10 @@
+{
+  "schema": "hexa.build/project-starter/v1",
+  "id": "svelte-go-postgres",
+  "name": "Svelte + Go + PostgreSQL",
+  "version": "1.0.0",
+  "digest": "ae08b43e075d20a83771fb450df8a19f167c1d0a98b08aad004e5d595413bac7",
+  "generated_project_contract": "hexa.build/project/v1",
+  "ownership": "project",
+  "automatic_upgrades": false
+}

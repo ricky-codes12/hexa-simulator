@@ -1,0 +1,207 @@
+{
+  "schema": "hexa.build/project-genesis/v1",
+  "generated_at": "2026-09-26T08:25:50Z",
+  "name": "hexa-simulator",
+  "starter": {
+    "schema": "hexa.build/project-starter/v1",
+    "id": "svelte-go-postgres",
+    "name": "Svelte + Go + PostgreSQL",
+    "version": "1.0.0",
+    "description": "Svelte 5 frontend on Bun, Go HTTP API, PostgreSQL persistence, migrations, tests, canonical verification, GitLab/GitHub CI, Dev controls, and Hexa.Build Runtime support.",
+    "language": "Svelte 5 + Bun 1.3.14 + Go 1.23+ + PostgreSQL",
+    "runtime_supported": true,
+    "generated_project_contract": "hexa.build/project/v1",
+    "digest": "ae08b43e075d20a83771fb450df8a19f167c1d0a98b08aad004e5d595413bac7",
+    "project_owned": true,
+    "automatic_upgrades": false
+  },
+  "generator": {
+    "name": "hexa-dev",
+    "version": "1.0.3-dev",
+    "revision": "858c789b32299bb58a0bb232c24beec8fd8dd80f"
+  },
+  "files": [
+    {
+      "path": ".github/workflows/verify.yml",
+      "mode": "0644",
+      "sha256": "cb3190c05b999c9879c438242b61e9e6be5ff42a1a31dde7bd64b8bd5d8e7b1b"
+    },
+    {
+      "path": ".gitignore",
+      "mode": "0644",
+      "sha256": "d3b08e888f2fafcb56225ca1304635063b74760a5bc7bf392f2bd92dc1ccd82f"
+    },
+    {
+      "path": ".gitlab-ci.yml",
+      "mode": "0644",
+      "sha256": "0bb6dece220aa52e6d1b9bc3a0c20473256a90ab65fee294a6048d61c28036b2"
+    },
+    {
+      "path": ".hexa/project",
+      "mode": "0755",
+      "sha256": "a247191f21a9016821a9f402a169ce47cb7a1b0b00462fc384a1bbd8699a9eab"
+    },
+    {
+      "path": ".hexa/project.yaml",
+      "mode": "0644",
+      "sha256": "c4b5da26c06f59132b5b9158b105016d46faa99ae8811a7bbf629498bbf8eaf2"
+    },
+    {
+      "path": ".hexa/starter.json",
+      "mode": "0644",
+      "sha256": "9846285ee2fa4b1747adf08780991ed5f985d500af9904fe42917997bc3ea385"
+    },
+    {
+      "path": "AGENTS.md",
+      "mode": "0644",
+      "sha256": "96acf5eb7913c3a2054578cdf355f122fa3910b4e647a34f338d5d046ca2dab9"
+    },
+    {
+      "path": "HEXA_BUILD_PROJECT.md",
+      "mode": "0644",
+      "sha256": "f095b52ab95a9fdf24acdeb6fccfc5193fe082be8b37117bb8f6a89b108a07bd"
+    },
+    {
+      "path": "Makefile",
+      "mode": "0644",
+      "sha256": "baedbe44b53cd2b6848e8d336ef43ecb1621c086586da09ba8e8a7d0d8627e70"
+    },
+    {
+      "path": "README.md",
+      "mode": "0644",
+      "sha256": "9417cf17ed6e0ed8da843815cf25850be4dc0be573a50513153c61eeea276b0e"
+    },
+    {
+      "path": "cmd/api/main.go",
+      "mode": "0644",
+      "sha256": "76eea9276c590651b16d4695a9c38242dd8112fcb2c639909c3d80f1b7006c4d"
+    },
+    {
+      "path": "config/runtime.env.example",
+      "mode": "0644",
+      "sha256": "58cd0f942c1dadd3f002be6180ccd6ec5ad86183d25ce480c20850fba0ba3a64"
+    },
+    {
+      "path": "db/migrations/001_init.sql",
+      "mode": "0644",
+      "sha256": "e3dd20816851d1f54145ad7d0b5c778885b4778225c5b6b9862d157d8ff31646"
+    },
+    {
+      "path": "docs/PROJECT_OPERATING_CHARTER.md",
+      "mode": "0644",
+      "sha256": "9adc2a227039efcd5a3f2b1787ef0512781d16391f1e85fdce0e8fc03ec94a9c"
+    },
+    {
+      "path": "docs/architecture/ARCHITECTURE.md",
+      "mode": "0644",
+      "sha256": "6fd92a704996e1ed0d8beca9e4cbb4156270264bfec166c1f15bcfb92a9ddebe"
+    },
+    {
+      "path": "docs/engineering/DELIVERY.md",
+      "mode": "0644",
+      "sha256": "7767987ffc660537fde22b0d99493d8e29c8ec8e13f2a490e5de36a5d89106bf"
+    },
+    {
+      "path": "docs/engineering/DEVELOPMENT.md",
+      "mode": "0644",
+      "sha256": "c80a1d952de1cab4e3fe6a9ad0c0f58f32a9e0e7b10f822445d2483d6dde3151"
+    },
+    {
+      "path": "docs/engineering/TESTING.md",
+      "mode": "0644",
+      "sha256": "e0d24b9500e1d0e7ebc338608e84d18c3b835d5bd66d9ae2adbc79ee9562756c"
+    },
+    {
+      "path": "go.mod",
+      "mode": "0644",
+      "sha256": "f46632390a982ba138fdd236e5eafa38edac218f4dafcfeac0de5706a6acadf2"
+    },
+    {
+      "path": "go.sum",
+      "mode": "0644",
+      "sha256": "90f48a605768fc3f5813e27cd5c63e854f07b8d1d92a5f6d7f9b9862e02ea445"
+    },
+    {
+      "path": "internal/httpapi/server.go",
+      "mode": "0644",
+      "sha256": "616abb5b7345142f9b3f00b4c0eb862af232ed8c86924d78deef9194bd706b96"
+    },
+    {
+      "path": "internal/httpapi/server_test.go",
+      "mode": "0644",
+      "sha256": "886d899fd05638a565639f8fb3cd4cf26dc05ccfb828256ddf01b4d5fe938545"
+    },
+    {
+      "path": "internal/postgresstore/store.go",
+      "mode": "0644",
+      "sha256": "ad30731438ab305a7dd88e68152daa728e7c7380697b7af0cd8ad666296cba5d"
+    },
+    {
+      "path": "internal/postgresstore/store_integration_test.go",
+      "mode": "0644",
+      "sha256": "09f2d923733961caf2c9b3b16723bf15a73450353aed0ef9d6c031433108b340"
+    },
+    {
+      "path": "scripts/migrate.sh",
+      "mode": "0755",
+      "sha256": "33acf2098326c2a14ab1c4e2893d8f90d90dabd11b0993d99455602c8eb9b663"
+    },
+    {
+      "path": "scripts/setup.sh",
+      "mode": "0755",
+      "sha256": "8ece619b6a15e0d33364848f85126f46e742a3888acdae4a18f8ae1a7b6229e4"
+    },
+    {
+      "path": "scripts/verify.sh",
+      "mode": "0755",
+      "sha256": "df7687b3e585e5e3e62b7838375a5f5044eb84f16811bc312009c314d0716ca4"
+    },
+    {
+      "path": "web/index.html",
+      "mode": "0644",
+      "sha256": "4bcc273407fdc4489b65b0cc0cd607d6fcc17a5028aa292d4e1e91f42f93a18d"
+    },
+    {
+      "path": "web/package.json",
+      "mode": "0644",
+      "sha256": "6bee654db877523b9c887f0907d9ab35a09a47abbc207eb927c3c22b16f36da6"
+    },
+    {
+      "path": "web/src/App.svelte",
+      "mode": "0644",
+      "sha256": "9e7fe85a2fb2547ac474f3cb655cf8d7b58534f93842c579400c85c3dd8d9f29"
+    },
+    {
+      "path": "web/src/app.css",
+      "mode": "0644",
+      "sha256": "a60a6c3b219f7559cc3108b52418e3a86a17d4d3de9bdd0971e4327f9200e1c9"
+    },
+    {
+      "path": "web/src/main.ts",
+      "mode": "0644",
+      "sha256": "02f162e6ecb1726fdc0098d10c5c94c145468026f4b6618259457f4ab97edc2a"
+    },
+    {
+      "path": "web/svelte.config.js",
+      "mode": "0644",
+      "sha256": "f9c30f3d032e24854276226efdf09f80e43a8f6dd190a27b0c6133c76b2826bb"
+    },
+    {
+      "path": "web/tsconfig.json",
+      "mode": "0644",
+      "sha256": "fb8a6d09ec7f1c7a32c1da5e634fd6573d676c8b2fddb06f9ba596bdd65339f8"
+    },
+    {
+      "path": "web/vite.config.js",
+      "mode": "0644",
+      "sha256": "cc6d26fcf4b1c25dc932baa6eaece8362b0b6ec0af88e0be734a4c19d58293e2"
+    }
+  ],
+  "next_steps": [
+    "review AGENTS.md, docs/architecture/ARCHITECTURE.md, and HEXA_BUILD_PROJECT.md",
+    "run ./scripts/setup.sh then ./scripts/verify.sh; PostgreSQL integration tests run when TEST_DATABASE_URL is configured",
+    "initialize Git and create the first reviewed commit",
+    "register the project in Hexa.Build; remote SCM delivery remains optional",
+    "configure DATABASE_URL in protected external Runtime environment before activating Runtime persistence"
+  ]
+}

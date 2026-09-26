@@ -1,0 +1,176 @@
+#!/usr/bin/env sh
+set -eu
+
+project_name="hexa-simulator"
+project_root="${HEXA_PROJECT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+project_state_dir="${HEXA_PROJECT_STATE_DIR:-${TMPDIR:-/tmp}/$project_name-state}"
+project_cache_dir="${HEXA_PROJECT_CACHE_DIR:-${TMPDIR:-/tmp}/$project_name-cache}"
+runtime_state_dir="${HEXA_RUNTIME_STATE_DIR:-$project_state_dir/runtime}"
+
+action_error() { printf '[project-adapter] ERROR: %s\n' "$*" >&2; exit 78; }
+require() { command -v "$1" >/dev/null 2>&1 || { printf '[project-adapter] missing required command: %s\n' "$1" >&2; exit 69; }; }
+prepare_cache() {
+  umask 077
+  mkdir -p "$project_state_dir" "$project_cache_dir/go-build" "$project_cache_dir/go-mod" "$project_cache_dir/bun"
+  export GOCACHE="$project_cache_dir/go-build"
+  export GOMODCACHE="$project_cache_dir/go-mod"
+  export BUN_INSTALL_CACHE_DIR="$project_cache_dir/bun"
+}
+prepare_cache
+cd "$project_root"
+
+dev_api_unit="hexa-$project_name-dev-api.service"
+dev_web_unit="hexa-$project_name-dev-web.service"
+runtime_unit="hexa-$project_name-runtime.service"
+
+dev_binary() { printf '%s/bin/api' "$project_state_dir"; }
+dev_state() { printf '%s/dev.state' "$project_state_dir"; }
+runtime_binary() { printf '%s/api' "${HEXA_RUNTIME_ARTIFACTS_DIR:?HEXA_RUNTIME_ARTIFACTS_DIR is required}"; }
+runtime_web_root() { printf '%s/web' "${HEXA_RUNTIME_ARTIFACTS_DIR:?HEXA_RUNTIME_ARTIFACTS_DIR is required}"; }
+runtime_active() { printf '%s/active.state' "$runtime_state_dir"; }
+state_value() { key=$1; file=$2; sed -n "s/^${key}=//p" "$file" | head -n 1; }
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}';
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}';
+  else printf 'missing SHA-256 utility\n' >&2; exit 69; fi
+}
+
+env_value() {
+  key=$1; file=$2
+  [ -f "$file" ] || action_error "Runtime environment file is unavailable: $file"
+  value=$(sed -n "s/^${key}=//p" "$file" | tail -n 1)
+  printf '%s' "$value" | sed "s/^['\"]//;s/['\"]$//"
+}
+
+runtime_listen() {
+  value='127.0.0.1:8080'
+  if [ -n "${RUNTIME_ENV_FILE:-}" ]; then
+    configured=$(env_value APP_LISTEN "$RUNTIME_ENV_FILE")
+    [ -z "$configured" ] || value=$configured
+  fi
+  case "$value" in 127.0.0.1:*|localhost:*|'[::1]':*) ;; *) action_error "APP_LISTEN must remain loopback for the generated starter: $value" ;; esac
+  printf '%s' "$value"
+}
+
+runtime_database_url() {
+  [ -n "${RUNTIME_ENV_FILE:-}" ] || action_error 'Runtime requires RUNTIME_ENV_FILE with DATABASE_URL'
+  value=$(env_value DATABASE_URL "$RUNTIME_ENV_FILE")
+  [ -n "$value" ] || action_error 'Runtime DATABASE_URL is required'
+  printf '%s' "$value"
+}
+
+run_doctor() {
+  require git; require go; require gofmt; require bun; require systemctl; require systemd-run; require journalctl
+  [ "$(bun --version)" = "1.3.14" ] || action_error "Bun 1.3.14 is required; found $(bun --version)"
+  [ -f .hexa/project.yaml ] || action_error 'project contract is missing'
+  [ -x .hexa/project ] || action_error 'project adapter is not executable'
+  top=$(git rev-parse --show-toplevel 2>/dev/null || true)
+  [ "$top" = "$project_root" ] || action_error "project root mismatch or Git is not initialized: expected=$project_root actual=${top:-none}"
+  printf '[project-adapter] doctor PASS\n'
+}
+run_setup() { run_doctor; exec ./scripts/setup.sh; }
+run_verify() { run_doctor; exec ./scripts/verify.sh; }
+
+start_api() {
+  unit=$1; listen=$2; binary=$3; database_url=${4:-}; web_root=${5:-}
+  systemctl --user stop "$unit" >/dev/null 2>&1 || true
+  systemctl --user reset-failed "$unit" >/dev/null 2>&1 || true
+  if [ -n "$database_url" ] && [ -n "$web_root" ]; then
+    systemd-run --user --quiet --collect --unit="$unit" --property=Restart=on-failure --property=RestartSec=2s --setenv="APP_LISTEN=$listen" --setenv="DATABASE_URL=$database_url" --setenv="WEB_ROOT=$web_root" -- "$binary" serve
+  elif [ -n "$database_url" ]; then
+    systemd-run --user --quiet --collect --unit="$unit" --property=Restart=on-failure --property=RestartSec=2s --setenv="APP_LISTEN=$listen" --setenv="DATABASE_URL=$database_url" -- "$binary" serve
+  else
+    systemd-run --user --quiet --collect --unit="$unit" --property=Restart=on-failure --property=RestartSec=2s --setenv="APP_LISTEN=$listen" -- "$binary" serve
+  fi
+}
+
+wait_health() {
+  binary=$1; listen=$2; attempt=0
+  while [ "$attempt" -lt 40 ]; do
+    if "$binary" health --address "$listen" >/dev/null 2>&1; then return 0; fi
+    attempt=$((attempt + 1)); sleep 0.25
+  done
+  return 1
+}
+
+run_dev_start() {
+  run_doctor
+  [ -d web/node_modules ] || ./scripts/setup.sh
+  mkdir -p "$project_state_dir/bin"
+  binary=$(dev_binary); revision=$(git rev-parse HEAD)
+  go build -trimpath -ldflags "-X main.revision=$revision" -o "$binary" ./cmd/api
+  api_listen='127.0.0.1:8080'; web_listen='127.0.0.1:5173'; database_url=${DATABASE_URL:-}
+  start_api "$dev_api_unit" "$api_listen" "$binary" "$database_url" ''
+  wait_health "$binary" "$api_listen" || { systemctl --user stop "$dev_api_unit" >/dev/null 2>&1 || true; action_error 'development API did not become healthy'; }
+  systemctl --user stop "$dev_web_unit" >/dev/null 2>&1 || true
+  systemd-run --user --quiet --collect --unit="$dev_web_unit" --property=Restart=on-failure --property=RestartSec=2s --working-directory="$project_root/web" -- bun run dev -- --host 127.0.0.1 --port 5173
+  { printf 'revision=%s\n' "$revision"; printf 'api=%s\n' "$api_listen"; printf 'web=%s\n' "$web_listen"; if [ -n "$database_url" ]; then printf 'database=configured\n'; else printf 'database=not-configured\n'; fi; } >"$(dev_state)"
+  printf 'dev start: web=http://%s api=http://%s database=%s\n' "$web_listen" "$api_listen" "$(if [ -n "$database_url" ]; then printf configured; else printf not-configured; fi)"
+}
+run_dev_stop() { systemctl --user stop "$dev_web_unit" >/dev/null 2>&1 || true; systemctl --user stop "$dev_api_unit" >/dev/null 2>&1 || true; rm -f "$(dev_state)"; printf 'dev stop: stopped\n'; }
+run_dev_status() {
+  api=stopped; web=stopped
+  systemctl --user is-active --quiet "$dev_api_unit" && api=running || true
+  systemctl --user is-active --quiet "$dev_web_unit" && web=running || true
+  printf 'api: %s\nweb: %s\n' "$api" "$web"; [ ! -f "$(dev_state)" ] || cat "$(dev_state)"
+}
+run_dev_logs() { journalctl --user -u "$dev_api_unit" -u "$dev_web_unit" -n 200 --no-pager 2>/dev/null || true; }
+
+require_runtime_env() {
+  : "${HEXA_RUNTIME_RELEASE_ID:?HEXA_RUNTIME_RELEASE_ID is required}"
+  : "${HEXA_RUNTIME_ARTIFACTS_DIR:?HEXA_RUNTIME_ARTIFACTS_DIR is required}"
+  : "${HEXA_RUNTIME_SOURCE_REVISION:?HEXA_RUNTIME_SOURCE_REVISION is required}"
+  mkdir -p "$runtime_state_dir" "$HEXA_RUNTIME_ARTIFACTS_DIR"
+}
+run_runtime_build() {
+  require_runtime_env
+  ./scripts/setup.sh
+  (cd web && bun run build)
+  rm -rf "$(runtime_web_root)"
+  mkdir -p "$(runtime_web_root)"
+  cp -R web/dist/. "$(runtime_web_root)/"
+  binary=$(runtime_binary)
+  go build -trimpath -ldflags "-X main.revision=$HEXA_RUNTIME_SOURCE_REVISION" -o "$binary" ./cmd/api
+  chmod 0755 "$binary"
+  printf 'runtime build: API and Svelte assets prepared for %s\n' "$HEXA_RUNTIME_SOURCE_REVISION"
+}
+run_runtime_package() { require_runtime_env; [ -x "$(runtime_binary)" ] || action_error 'built Runtime API is missing'; [ -f "$(runtime_web_root)/index.html" ] || action_error 'built Runtime web assets are missing'; printf 'runtime package: API binary + static Svelte assets ready\n'; }
+run_runtime_verify() {
+  require_runtime_env
+  binary=$(runtime_binary); [ -x "$binary" ] || action_error 'Runtime API is missing'; [ -f "$(runtime_web_root)/index.html" ] || action_error 'Runtime web index is missing'
+  reported=$($binary version | sed -n 's/^revision: //p' | head -n 1)
+  [ "$reported" = "$HEXA_RUNTIME_SOURCE_REVISION" ] || action_error "Runtime binary revision mismatch: $reported"
+  printf 'runtime verify: immutable API + web assets PASS\n'
+}
+run_runtime_activate() {
+  require_runtime_env; run_runtime_verify
+  binary=$(runtime_binary); listen=$(runtime_listen); database_url=$(runtime_database_url); digest=$(sha256_file "$binary"); web_root=$(runtime_web_root)
+  start_api "$runtime_unit" "$listen" "$binary" "$database_url" "$web_root"
+  wait_health "$binary" "$listen" || { systemctl --user stop "$runtime_unit" >/dev/null 2>&1 || true; action_error 'Runtime service did not become healthy'; }
+  active=$(runtime_active); temporary="$active.tmp.$$"; trap 'rm -f "$temporary"' EXIT HUP INT TERM
+  { printf 'release_id=%s\n' "$HEXA_RUNTIME_RELEASE_ID"; printf 'revision=%s\n' "$HEXA_RUNTIME_SOURCE_REVISION"; printf 'binary=%s\n' "$binary"; printf 'sha256=%s\n' "$digest"; printf 'web_root=%s\n' "$web_root"; printf 'listen=%s\n' "$listen"; printf 'unit=%s\n' "$runtime_unit"; } >"$temporary"
+  chmod 0600 "$temporary"; mv -f "$temporary" "$active"; trap - EXIT HUP INT TERM
+  printf 'runtime activate: %s at http://%s\n' "$HEXA_RUNTIME_RELEASE_ID" "$listen"
+}
+run_runtime_health() {
+  require_runtime_env; active=$(runtime_active); [ -f "$active" ] || action_error 'no active Runtime state'
+  [ "$(state_value release_id "$active")" = "$HEXA_RUNTIME_RELEASE_ID" ] || action_error 'active Runtime release mismatch'
+  binary=$(state_value binary "$active"); listen=$(state_value listen "$active"); expected=$(state_value sha256 "$active")
+  [ "$(sha256_file "$binary")" = "$expected" ] || action_error 'active Runtime binary digest mismatch'
+  systemctl --user is-active --quiet "$runtime_unit" || action_error 'Runtime supervisor is not active'
+  "$binary" health --address "$listen" >/dev/null || action_error 'Runtime health endpoint failed'
+  printf 'runtime health: healthy\nrelease_id: %s\nlisten: %s\n' "$HEXA_RUNTIME_RELEASE_ID" "$listen"
+}
+run_runtime_deactivate() { require_runtime_env; systemctl --user stop "$runtime_unit" >/dev/null 2>&1 || true; rm -f "$(runtime_active)"; printf 'runtime deactivate: stopped\n'; }
+run_runtime_logs() { require_runtime_env; journalctl --user -u "$runtime_unit" -n 200 --no-pager 2>/dev/null || true; }
+
+case "${1:-}" in
+  doctor) run_doctor ;;
+  setup) run_setup ;;
+  verify) run_verify ;;
+  dev)
+    case "${2:-}" in start) run_dev_start ;; stop) run_dev_stop ;; restart) run_dev_stop; run_dev_start ;; status) run_dev_status ;; logs) run_dev_logs ;; *) action_error "unsupported dev operation: ${2:-<missing>}" ;; esac ;;
+  runtime)
+    case "${2:-}" in build) run_runtime_build ;; package) run_runtime_package ;; verify) run_runtime_verify ;; activate) run_runtime_activate ;; health) run_runtime_health ;; deactivate) run_runtime_deactivate ;; logs) run_runtime_logs ;; *) action_error "unsupported Runtime operation: ${2:-<missing>}" ;; esac ;;
+  *) action_error "unsupported operation: ${1:-<missing>}" ;;
+esac

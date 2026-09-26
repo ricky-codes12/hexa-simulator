@@ -1,0 +1,7 @@
+schema: hexa.build/project/v1
+name: hexa-simulator
+adapter: .hexa/project
+environment:
+  pass:
+    - DATABASE_URL
+    - TEST_DATABASE_URL
