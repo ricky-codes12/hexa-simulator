@@ -31,3 +31,20 @@ Telemetry follows one of two deterministic Jakarta demo routes selected from the
 The simulator now has an optional backend Teltonika TCP output boundary. When `TELTONIKA_GATEWAY_ADDR` is configured, each online application telemetry update is also encoded as a single-record Codec 8 Extended (`0x8E`) AVL packet. The adapter performs the Teltonika TCP IMEI handshake, validates the one-byte IMEI acceptance response, sends the AVL packet with CRC-16/IBM, and requires a four-byte acknowledgement accepting exactly one record. Gateway connection failures are returned as HTTP 502 so integration failures are visible during a demo rather than silently ignored.
 
 The gateway address and timeout are external configuration (`TELTONIKA_GATEWAY_ADDR`, `TELTONIKA_GATEWAY_TIMEOUT`); no downstream address or credential is committed. With no gateway address configured, standalone simulator behavior is unchanged. The current adapter opens a TCP connection for each telemetry sample, which is intentionally simple and deterministic for integration testing; connection pooling/session persistence can be introduced after the target Gateway behavior is known. This does **not** claim an APSS Tensor application contract, UDP support, or every Teltonika IO element. The current wire contract is the documented Teltonika TCP + Codec 8 Extended subset needed to expose simulator GPS, speed, heading, timestamp, and ignition telemetry to a compatible Gateway.
+
+
+## Project-owned Teltonika Gateway
+
+The application can now close the integration loop without physical tracker hardware:
+
+~~~text
+Simulator telemetry -> Teltonika TCP client -> project Gateway listener
+  -> IMEI handshake -> Codec 8E decode/validation -> normalized JSON
+  -> HTTP POST + X-SECRET-KEY -> HEXA.SENSOR
+~~~
+
+`TELTONIKA_GATEWAY_LISTEN` enables the project-owned TCP server. When enabled, `HEXA_SENSOR_URL` and `HEXA_SENSOR_SECRET_KEY` are required. If `TELTONIKA_GATEWAY_ADDR` is unset, the simulator client automatically targets the listener's bound address. This preserves the existing option to target an external Teltonika-compatible Gateway by setting `TELTONIKA_GATEWAY_ADDR` explicitly.
+
+The listener accepts the same one-record Codec 8 Extended subset that the simulator emits, validates the packet CRC and IO layout, decodes GPS/speed/heading/ignition, forwards normalized JSON, and only acknowledges the AVL record after HEXA.SENSOR returns a 2xx response. A downstream HTTP failure therefore propagates back through the Teltonika client and the simulator API instead of producing a false successful demo.
+
+Secrets remain outside Git. Runtime loads `HEXA_SENSOR_SECRET_KEY` from the protected Runtime environment file via systemd's EnvironmentFile support rather than placing the secret value in process command arguments. The current normalized contract deliberately excludes fuel because no fuel IO value exists in the current simulator Codec 8E record.
