@@ -12,4 +12,6 @@ The simulator remains standalone by default. To forward online telemetry to a Te
 
 ## HEXA.SENSOR integration
 
-Set `HEXA_SENSOR_SECRET_KEY` only in the local/protected environment when exercising the pull integration. HEXA.SENSOR calls `GET /api/integration/devices` and supplies the same value in the `X-SECRET-KEY` header. No HEXA.SENSOR destination URL is configured in hexa-simulator.
+For HTTP Push development, configure `SIM_SENSOR_PUSH_URL` and `SIM_SENSOR_PUSH_KEY` together in the local/protected environment. `SIM_SENSOR_PUSH_URL` is the full Hexa.Sensor connector endpoint (for example a local `/ingest/v1/<instance>` URL); `SIM_SENSOR_PUSH_KEY` is the connector ingest key and is sent as a Bearer credential. `SIM_SENSOR_PUSH_TIMEOUT` is optional and defaults to `5s`. Never commit the real key.
+
+With these values absent, no HTTP Push forwarder is enabled.

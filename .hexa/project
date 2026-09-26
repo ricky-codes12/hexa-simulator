@@ -103,8 +103,10 @@ run_dev_start() {
   go build -trimpath -ldflags "-X main.revision=$revision" -o "$binary" ./cmd/api
   api_listen='127.0.0.1:8080'; web_listen='127.0.0.1:5173'; database_url=${DATABASE_URL:-}; gateway_addr=${TELTONIKA_GATEWAY_ADDR:-}; gateway_timeout=${TELTONIKA_GATEWAY_TIMEOUT:-5s}
   dev_env_file=''
-  if [ -n "${HEXA_SENSOR_SECRET_KEY:-}" ]; then
-    dev_env_file="$project_state_dir/dev-secrets.env"; umask 077; printf 'HEXA_SENSOR_SECRET_KEY=%s\n' "$HEXA_SENSOR_SECRET_KEY" >"$dev_env_file"
+  if [ -n "${SIM_SENSOR_PUSH_URL:-}" ] || [ -n "${SIM_SENSOR_PUSH_KEY:-}" ]; then
+    [ -n "${SIM_SENSOR_PUSH_URL:-}" ] && [ -n "${SIM_SENSOR_PUSH_KEY:-}" ] || action_error 'SIM_SENSOR_PUSH_URL and SIM_SENSOR_PUSH_KEY must be configured together'
+    dev_env_file="$project_state_dir/dev-secrets.env"; umask 077
+    { printf 'SIM_SENSOR_PUSH_URL=%s\n' "$SIM_SENSOR_PUSH_URL"; printf 'SIM_SENSOR_PUSH_KEY=%s\n' "$SIM_SENSOR_PUSH_KEY"; printf 'SIM_SENSOR_PUSH_TIMEOUT=%s\n' "${SIM_SENSOR_PUSH_TIMEOUT:-5s}"; } >"$dev_env_file"
   fi
   start_api "$dev_api_unit" "$api_listen" "$binary" "$database_url" '' "$gateway_addr" "$gateway_timeout" "$dev_env_file"
   wait_health "$binary" "$api_listen" || { systemctl --user stop "$dev_api_unit" >/dev/null 2>&1 || true; action_error 'development API did not become healthy'; }
