@@ -59,7 +59,7 @@ func (f *fakeStore) UpdateTelemetry(_ context.Context, id int64, input Telemetry
 }
 
 func TestHealthWorksWithoutDatabase(t *testing.T) {
-	h := Handler("test", nil, "")
+	h := Handler("test", nil, "", "")
 	r := httptest.NewRecorder()
 	h.ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if r.Code != 200 || !strings.Contains(r.Body.String(), `"database_configured":false`) {
@@ -67,7 +67,7 @@ func TestHealthWorksWithoutDatabase(t *testing.T) {
 	}
 }
 func TestConfiguredButUnreadyDatabaseFailsHealth(t *testing.T) {
-	h := Handler("test", &fakeStore{pingErr: errors.New("no")}, "")
+	h := Handler("test", &fakeStore{pingErr: errors.New("no")}, "", "")
 	r := httptest.NewRecorder()
 	h.ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if r.Code != 503 {
@@ -76,7 +76,7 @@ func TestConfiguredButUnreadyDatabaseFailsHealth(t *testing.T) {
 }
 func TestDeviceFlow(t *testing.T) {
 	s := &fakeStore{}
-	h := Handler("test", s, "")
+	h := Handler("test", s, "", "")
 	c := httptest.NewRecorder()
 	h.ServeHTTP(c, httptest.NewRequest(http.MethodPost, "/api/devices", strings.NewReader(`{"name":"Truck 01","imei":"352093081234567","model":"Teltonika FMC920"}`)))
 	if c.Code != 201 || !strings.Contains(c.Body.String(), "Truck 01") {
@@ -91,7 +91,7 @@ func TestDeviceFlow(t *testing.T) {
 
 func TestTelemetryValidation(t *testing.T) {
 	s := &fakeStore{items: []Device{{ID: 1, Name: "Truck", IMEI: "1", Status: "offline"}}}
-	h := Handler("test", s, "")
+	h := Handler("test", s, "", "")
 	for _, payload := range []string{
 		`{"status":"online","latitude":91,"longitude":106.8,"speed":42,"heading":90,"ignition":true}`,
 		`{"status":"online","latitude":-6.2,"longitude":181,"speed":42,"heading":90,"ignition":true}`,
@@ -108,7 +108,7 @@ func TestTelemetryValidation(t *testing.T) {
 
 func TestDeleteDevice(t *testing.T) {
 	s := &fakeStore{items: []Device{{ID: 1, Name: "Truck", IMEI: "1", Status: "offline"}}}
-	h := Handler("test", s, "")
+	h := Handler("test", s, "", "")
 	r := httptest.NewRecorder()
 	h.ServeHTTP(r, httptest.NewRequest(http.MethodDelete, "/api/devices/1", nil))
 	if r.Code != http.StatusNoContent || len(s.items) != 0 {
@@ -119,7 +119,7 @@ func TestDeleteDevice(t *testing.T) {
 func TestOnlineTelemetryIsForwarded(t *testing.T) {
 	s := &fakeStore{items: []Device{{ID: 1, Name: "Truck", IMEI: "352093081234567", Status: "offline"}}}
 	f := &fakeForwarder{}
-	h := Handler("test", s, "", f)
+	h := Handler("test", s, "", "", f)
 	r := httptest.NewRecorder()
 	h.ServeHTTP(r, httptest.NewRequest(http.MethodPost, "/api/devices/1/telemetry", strings.NewReader(`{"status":"online","latitude":-6.2,"longitude":106.8,"speed":42,"heading":90,"ignition":true}`)))
 	if r.Code != http.StatusOK || len(f.devices) != 1 || f.devices[0].IMEI != "352093081234567" {
@@ -130,10 +130,48 @@ func TestOnlineTelemetryIsForwarded(t *testing.T) {
 func TestGatewayFailureIsVisible(t *testing.T) {
 	s := &fakeStore{items: []Device{{ID: 1, Name: "Truck", IMEI: "352093081234567", Status: "offline"}}}
 	f := &fakeForwarder{err: errors.New("gateway unavailable")}
-	h := Handler("test", s, "", f)
+	h := Handler("test", s, "", "", f)
 	r := httptest.NewRecorder()
 	h.ServeHTTP(r, httptest.NewRequest(http.MethodPost, "/api/devices/1/telemetry", strings.NewReader(`{"status":"online","latitude":-6.2,"longitude":106.8,"speed":42,"heading":90,"ignition":true}`)))
 	if r.Code != http.StatusBadGateway || !strings.Contains(r.Body.String(), "gateway unavailable") {
 		t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
+	}
+}
+
+func TestIntegrationDevicesRequiresSecret(t *testing.T) {
+	s := &fakeStore{items: []Device{{ID: 1, Name: "Truck 01", IMEI: "352093081234567", Status: "online", Latitude: -6.2, Longitude: 106.8, Speed: 42, Heading: 90, Ignition: true}}}
+	h := Handler("test", s, "", "demo-secret")
+
+	missing := httptest.NewRecorder()
+	h.ServeHTTP(missing, httptest.NewRequest(http.MethodGet, "/api/integration/devices", nil))
+	if missing.Code != http.StatusUnauthorized {
+		t.Fatalf("missing secret status=%d body=%s", missing.Code, missing.Body.String())
+	}
+
+	wrongRequest := httptest.NewRequest(http.MethodGet, "/api/integration/devices", nil)
+	wrongRequest.Header.Set("X-SECRET-KEY", "wrong")
+	wrong := httptest.NewRecorder()
+	h.ServeHTTP(wrong, wrongRequest)
+	if wrong.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong secret status=%d body=%s", wrong.Code, wrong.Body.String())
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/integration/devices", nil)
+	request.Header.Set("X-SECRET-KEY", "demo-secret")
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"imei":"352093081234567"`) || !strings.Contains(response.Body.String(), `"speed":42`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestIntegrationDevicesDisabledWithoutConfiguredSecret(t *testing.T) {
+	h := Handler("test", &fakeStore{}, "", "")
+	request := httptest.NewRequest(http.MethodGet, "/api/integration/devices", nil)
+	request.Header.Set("X-SECRET-KEY", "anything")
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
