@@ -10,6 +10,16 @@ import (
 	"time"
 )
 
+type fakeForwarder struct {
+	devices []Device
+	err     error
+}
+
+func (f *fakeForwarder) ForwardTelemetry(_ context.Context, device Device) error {
+	f.devices = append(f.devices, device)
+	return f.err
+}
+
 type fakeStore struct {
 	items   []Device
 	pingErr error
@@ -103,5 +113,27 @@ func TestDeleteDevice(t *testing.T) {
 	h.ServeHTTP(r, httptest.NewRequest(http.MethodDelete, "/api/devices/1", nil))
 	if r.Code != http.StatusNoContent || len(s.items) != 0 {
 		t.Fatalf("status=%d items=%d body=%s", r.Code, len(s.items), r.Body.String())
+	}
+}
+
+func TestOnlineTelemetryIsForwarded(t *testing.T) {
+	s := &fakeStore{items: []Device{{ID: 1, Name: "Truck", IMEI: "352093081234567", Status: "offline"}}}
+	f := &fakeForwarder{}
+	h := Handler("test", s, "", f)
+	r := httptest.NewRecorder()
+	h.ServeHTTP(r, httptest.NewRequest(http.MethodPost, "/api/devices/1/telemetry", strings.NewReader(`{"status":"online","latitude":-6.2,"longitude":106.8,"speed":42,"heading":90,"ignition":true}`)))
+	if r.Code != http.StatusOK || len(f.devices) != 1 || f.devices[0].IMEI != "352093081234567" {
+		t.Fatalf("status=%d forwarded=%+v body=%s", r.Code, f.devices, r.Body.String())
+	}
+}
+
+func TestGatewayFailureIsVisible(t *testing.T) {
+	s := &fakeStore{items: []Device{{ID: 1, Name: "Truck", IMEI: "352093081234567", Status: "offline"}}}
+	f := &fakeForwarder{err: errors.New("gateway unavailable")}
+	h := Handler("test", s, "", f)
+	r := httptest.NewRecorder()
+	h.ServeHTTP(r, httptest.NewRequest(http.MethodPost, "/api/devices/1/telemetry", strings.NewReader(`{"status":"online","latitude":-6.2,"longitude":106.8,"speed":42,"heading":90,"ignition":true}`)))
+	if r.Code != http.StatusBadGateway || !strings.Contains(r.Body.String(), "gateway unavailable") {
+		t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
 	}
 }

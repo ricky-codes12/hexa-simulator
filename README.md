@@ -11,7 +11,8 @@ Hexa Simulator is a Hexa.Build-native Svelte + Go + PostgreSQL application for d
 - Online devices emit deterministic Jakarta route telemetry every three seconds (position, speed, heading, ignition) through the Go API and persist the latest state in PostgreSQL.
 - A page reload resumes the browser simulation clock for devices persisted as online.
 - Telemetry input is range-validated by the API.
-- The simulator does not claim to implement Teltonika wire protocols or an APSS Tensor contract yet; the current boundary is an application-level telemetry simulator ready for a future output adapter.
+- Optional backend-first Teltonika TCP output: when `TELTONIKA_GATEWAY_ADDR` is configured, online telemetry is encoded as Codec 8 Extended (`0x8E`) with an IMEI handshake, CRC-16/IBM, and AVL acknowledgement validation before the API reports success.
+- The simulator still does not claim an APSS Tensor application contract; the TCP target is an externally configured Teltonika-compatible Gateway.
 
 ## Start here
 
