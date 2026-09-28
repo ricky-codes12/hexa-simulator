@@ -50,7 +50,7 @@
       const hr=await fetch('/healthz'); health=await hr.json();
       if(!health?.database_ready){message='Database is not ready';return}
       const r=await fetch('/api/devices'); if(!r.ok) throw new Error('Unable to load devices');
-      const p=await r.json(); devices=p.items??[]; syncSelected(); message='Simulator ready';
+      const p=await r.json(); devices=p.items??[]; syncSelected(); if(!selected&&devices.length) selected=devices[0]; message='Simulator ready';
       for(const device of devices) if(device.status==='online'&&!timers.has(device.id)) resume(device);
     }catch(e){message=e instanceof Error?e.message:'Connection failed'}
   }
@@ -113,57 +113,79 @@
       </div>
     </div>
 
-    <main>
-      <header>
-        <div><h1>Devices</h1><p class="subtitle">Virtual GPS devices for telemetry simulation and integration testing.</p></div>
+    <main class="live-main">
+      <header class="live-page-head">
+        <div><h1>Live Map</h1><p class="subtitle">Live virtual GPS telemetry for Hexa.Sensor integration testing.</p></div>
         <button class="primary" onclick={()=>showAdd=true}>＋ Add device</button>
       </header>
 
-      <section class="stats" aria-label="Simulator summary">
-        <article><span>⌁ &nbsp;Devices</span><strong>{devices.length}</strong><small>{devices.length===1?'1 virtual unit':'Virtual units registered'}</small></article>
-        <article><span>◉ &nbsp;Online</span><strong>{devices.filter(d=>d.status==='online').length}</strong><small>Currently marked online</small></article>
-        <article><span>⇄ &nbsp;Transmitting</span><strong>{devices.filter(d=>d.status==='online').length}</strong><small>Telemetry cadence ~3s</small></article>
-        <article><span>♡ &nbsp;Runtime</span><strong class="runtime">{health?.database_ready?'Ready':'Checking'}</strong><small>{message}</small></article>
-      </section>
+      <section class="live-workbench" aria-label="Live simulator map">
+        <aside class="live-sidebar">
+          <div class="live-sidebar-head">
+            <div class="live-title-row"><h2>Live Map</h2><div class="panel-tools"><button aria-label="Edit view">⌁</button><button aria-label="Wallboard">▣</button></div></div>
+            <div class="live-now"><i></i><strong>Live</strong><span>{devices.some(d=>d.status==='online')?'just now':'waiting'}</span></div>
+          </div>
+          <div class="live-sidebar-body">
+            <div class="search-box">⌕ <span>Name, device ID or model</span></div>
+            <div class="filter-chips">
+              <span class="chip moving">▲ Moving <b>{devices.filter(d=>d.status==='online'&&d.speed>0).length}</b></span>
+              <span class="chip idle">● Idle <b>{devices.filter(d=>d.status==='online'&&d.speed===0).length}</b></span>
+              <span class="chip parked">■ Parked <b>{devices.filter(d=>d.status==='offline').length}</b></span>
+              <span class="chip reporting">◆ Reporting <b>{devices.filter(d=>d.status==='online').length}</b></span>
+            </div>
+            <div class="device-section-label">Devices</div>
+            <div class="live-device-list">
+              {#each devices as device (device.id)}
+                <button class:selected-device={selected?.id===device.id} class="live-device-row" onclick={()=>selected=device}>
+                  <span class:active-arrow={device.status==='online'} class="device-arrow">▲</span>
+                  <span class="device-row-copy"><strong>{device.name}</strong><small>{device.model}</small><small class="mono">{device.imei}</small></span>
+                  <span class="device-row-meta"><small>{device.status==='online'?'just now':'offline'}</small><strong>{Math.round(device.speed)} <em>km/h</em></strong></span>
+                </button>
+              {/each}
+            </div>
+          </div>
+          {#if selected}
+            <div class="selected-telemetry">
+              <div><span>Heading</span><strong>{Math.round(selected.heading)}°</strong></div>
+              <div><span>Ignition</span><strong class:green={selected.ignition}>{selected.ignition?'On':'Off'}</strong></div>
+              <div><span>Position</span><strong class="mono">{selected.latitude.toFixed(5)}, {selected.longitude.toFixed(5)}</strong></div>
+              <div class="device-actions">
+                {#if selected.status==='online'}<button class="stop" onclick={()=>void stop(selected!)}>■ Stop</button>{:else}<button class="start" onclick={()=>void start(selected!)}>▶ Start</button>{/if}
+                <button class="danger compact-danger" onclick={()=>void remove(selected!)}>Delete</button>
+              </div>
+            </div>
+          {/if}
+        </aside>
 
-      <section class="panel">
-        <div class="panel-head">
-          <div><h2>Devices</h2><p>Manage virtual Teltonika-style devices and inspect their latest telemetry.</p></div>
-          <button class="ghost" onclick={()=>void refresh()}>↻ Refresh</button>
+        <div class="sensor-map-stage">
+          {#if selected}
+            {@const map=mapGeometry(selected)}
+            <svg class="sensor-map" viewBox={`0 0 ${map.width} ${map.height}`} preserveAspectRatio="xMidYMid slice" role="img" aria-label={`Live map position for ${selected.name}`}>
+              <defs>
+                <pattern id="sensorGrid" width="42" height="42" patternUnits="userSpaceOnUse"><path d="M42 0H0V42" fill="none" /></pattern>
+                <linearGradient id="mapGlow" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0b1718"/><stop offset="1" stop-color="#081016"/></linearGradient>
+              </defs>
+              <rect width="100%" height="100%" fill="url(#mapGlow)"/>
+              <path d="M0 82 L115 70 L205 83 L310 65 L420 80 L535 74 L640 91" class="map-road major"/>
+              <path d="M36 248 L90 210 L150 220 L204 190 L250 198 L308 156 L370 165 L430 140 L500 160 L590 135" class="map-road"/>
+              <path d="M70 108 H570 V260 H70 Z" class="operating-area"/>
+              <rect x="70" y="108" width="500" height="152" fill="url(#sensorGrid)" class="sensor-grid"/>
+              <polyline points={map.routePoints} class="trail-shadow"/><polyline points={map.routePoints} class="sensor-trail"/>
+              <circle cx={map.marker.x} cy={map.marker.y} r="15" class:marker-online={selected.status==='online'} class="marker-pulse"/>
+              <g transform={`translate(${map.marker.x} ${map.marker.y}) rotate(${selected.heading})`} class="sensor-vehicle"><path d="M0 -11 L8 9 L0 5 L-8 9 Z"/></g>
+              <text x="88" y="132" class="map-label">Jakarta Demo Route</text>
+              <text x="455" y="238" class="map-label subtle">Hexa.Simulator</text>
+            </svg>
+            <div class="map-device-pop"><span class="map-pop-arrow">▲</span><div><strong>{selected.name}</strong><small>{Math.round(selected.speed)} km/h · {Math.round(selected.heading)}°</small></div></div>
+          {:else}
+            <div class="map-empty"><span>⌁</span><strong>No device selected</strong><small>Add or select a virtual device to view its live position.</small></div>
+          {/if}
+          <div class="map-controls"><button aria-label="Zoom in">＋</button><button aria-label="Zoom out">−</button><button aria-label="Fullscreen">⌗</button><button aria-label="Layers">▱</button></div>
+          <div class="map-legend"><span><i class="legend-operating"></i> Demo area</span><span><i class="legend-trail"></i> Trail</span><span><i class="legend-device"></i> Device</span><em>Virtual demo geography</em></div>
+          <div class="map-runtime"><i class:ok={health?.database_ready}></i>{health?.database_ready?'Runtime ready':'Runtime unavailable'}<span>·</span><span>~3s telemetry</span></div>
         </div>
-        {#if devices.length===0}
-          <div class="empty"><div class="empty-icon">⌁</div><h3>No devices yet</h3><p>Add your first virtual GPS device to begin the simulation.</p><button class="primary" onclick={()=>showAdd=true}>＋ Add device</button></div>
-        {:else}
-          <div class="table-wrap"><table><thead><tr><th>Device</th><th>IMEI</th><th>Model</th><th>Status</th><th>Speed</th><th>Last position</th><th></th></tr></thead><tbody>{#each devices as device (device.id)}<tr><td><button class="device-name" onclick={()=>selected=device}><span class="device-icon">⌁</span><span><strong>{device.name}</strong><small>Device #{String(device.id).padStart(4,'0')}</small></span></button></td><td class="mono">{device.imei}</td><td>{device.model}</td><td><span class:online={device.status==='online'} class="badge"><i></i>{device.status}</span></td><td>{Math.round(device.speed)} km/h</td><td class="mono">{device.latitude.toFixed(5)}, {device.longitude.toFixed(5)}</td><td><div class="actions">{#if device.status==='online'}<button class="stop" onclick={()=>void stop(device)}>Stop</button>{:else}<button class="start" onclick={()=>void start(device)}>Start</button>{/if}<button class="more" aria-label={`Open ${device.name}`} onclick={()=>selected=device}>•••</button></div></td></tr>{/each}</tbody></table></div>
-        {/if}
       </section>
     </main>
   </div>
 </div>
 {#if showAdd}<div class="backdrop" role="presentation" onclick={(e)=>{if(e.currentTarget===e.target)showAdd=false}}><form class="modal" onsubmit={(e)=>{e.preventDefault();void addDevice()}}><div class="modal-head"><div><p class="eyebrow">NEW SIMULATOR</p><h2>Add device</h2></div><button type="button" class="close" onclick={()=>showAdd=false}>×</button></div><label>Device name<input bind:value={name} placeholder="Truck 01" autofocus /></label><label>IMEI / Device ID<input bind:value={imei} placeholder="352093081234567" /></label><label>Device model<select bind:value={model}><option>Teltonika FMC920</option><option>Teltonika FMB920</option><option>Teltonika FMC130</option><option>Generic GPS Tracker</option></select></label><p class="hint">Each device follows a repeatable Jakarta demo route and emits telemetry every 3 seconds while online.</p><div class="modal-actions"><button type="button" class="ghost" onclick={()=>showAdd=false}>Cancel</button><button class="primary" disabled={saving||!name.trim()||!imei.trim()}>{saving?'Creating…':'Create Device'}</button></div></form></div>{/if}
-{#if selected}
-  {@const map=mapGeometry(selected)}
-  <div class="backdrop" role="presentation" onclick={(e)=>{if(e.currentTarget===e.target)selected=null}}>
-    <section class="modal detail live-detail">
-      <div class="modal-head"><div><p class="eyebrow">LIVE DEVICE</p><h2>{selected.name}</h2><p class="detail-sub">{selected.model} · <span class="mono">{selected.imei}</span></p></div><button class="close" onclick={()=>selected=null}>×</button></div>
-      <div class="live-layout">
-        <div class="map-card">
-          <div class="map-head"><div><span class:online-dot={selected.status==='online'} class="live-dot"></span><strong>{selected.status==='online'?'Live telemetry':'Simulation stopped'}</strong></div><span>3 sec cadence</span></div>
-          <svg class="live-map" viewBox={`0 0 ${map.width} ${map.height}`} role="img" aria-label={`Demo route and live position for ${selected.name}`}>
-            <defs><pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M 32 0 L 0 0 0 32" fill="none" /></pattern></defs>
-            <rect width="100%" height="100%" class="map-bg"/><rect width="100%" height="100%" fill="url(#grid)" class="map-grid"/>
-            <polyline points={map.routePoints} class="route-shadow"/><polyline points={map.routePoints} class="route-line"/>
-            <circle cx={map.marker.x} cy={map.marker.y} r="15" class:marker-online={selected.status==='online'} class="marker-pulse"/>
-            <g transform={`translate(${map.marker.x} ${map.marker.y}) rotate(${selected.heading})`} class="vehicle-marker"><circle r="9"/><path d="M 0 -6 L 5 5 L 0 3 L -5 5 Z"/></g>
-          </svg>
-          <div class="map-foot"><span class="mono">{selected.latitude.toFixed(6)}, {selected.longitude.toFixed(6)}</span><span>Demo route · Jakarta</span></div>
-        </div>
-        <div class="telemetry-panel">
-          <div class="telemetry-hero"><span>Speed</span><strong>{Math.round(selected.speed)}</strong><small>km/h</small></div>
-          <div class="detail-grid compact"><div><span>Status</span><strong class:green={selected.status==='online'}>{selected.status}</strong></div><div><span>Ignition</span><strong>{selected.ignition?'ON':'OFF'}</strong></div><div><span>Heading</span><strong>{Math.round(selected.heading)}°</strong></div><div><span>Device ID</span><strong>#{String(selected.id).padStart(4,'0')}</strong></div><div class="wide"><span>Last telemetry</span><strong>{updatedLabel(selected.updated_at)}</strong></div></div>
-        </div>
-      </div>
-      <div class="modal-actions split"><button class="danger" onclick={()=>void remove(selected!)}>Delete Device</button><div>{#if selected.status==='online'}<button class="stop" onclick={()=>void stop(selected!)}>■ Stop Simulation</button>{:else}<button class="primary" onclick={()=>void start(selected!)}>▶ Start Simulation</button>{/if}</div></div>
-    </section>
-  </div>
-{/if}
