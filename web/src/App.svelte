@@ -94,29 +94,52 @@
 
 <div class="shell">
   <aside>
-    <div class="brand"><div class="mark">H</div><div><strong>Hexa</strong><span>Simulator</span></div></div>
-    <nav><button class="nav-active"><span>▣</span> Device</button></nav>
-    <div class="aside-foot"><span class:ok={health?.database_ready}></span>{health?.database_ready?'System connected':'System unavailable'}</div>
+    <div class="brand">
+      <div class="mark"><span>H</span></div>
+      <div><strong>Hexa.Simulator</strong><span>hexa-simulator</span></div>
+    </div>
+    <div class="nav-section">Simulator</div>
+    <nav><button class="nav-active"><span class="nav-icon">⌁</span> Devices</button></nav>
+    <div class="aside-foot"><span class:ok={health?.database_ready}></span>{health?.database_ready?'Runtime connected':'Runtime unavailable'}</div>
   </aside>
-  <main>
-    <header><div><p class="eyebrow">DEVICE SIMULATOR</p><h1>Devices</h1><p class="subtitle">Create virtual GPS devices and stream deterministic demo telemetry without physical hardware.</p></div><button class="primary" onclick={()=>showAdd=true}>＋ Add Device</button></header>
-    <section class="stats">
-      <article><span>Total devices</span><strong>{devices.length}</strong><small>Registered simulator units</small></article>
-      <article><span>Online</span><strong>{devices.filter(d=>d.status==='online').length}</strong><small>Actively transmitting</small></article>
-      <article><span>Offline</span><strong>{devices.filter(d=>d.status==='offline').length}</strong><small>Simulation stopped</small></article>
-      <article><span>Runtime</span><strong class="runtime">{health?.database_ready?'Ready':'Checking'}</strong><small>{message}</small></article>
-    </section>
-    <section class="panel">
-      <div class="panel-head"><div><h2>Device list</h2><p>Virtual Teltonika-style units for repeatable demo and integration testing.</p></div><button class="ghost" onclick={()=>void refresh()}>↻ Refresh</button></div>
-      {#if devices.length===0}
-        <div class="empty"><div class="empty-icon">⌁</div><h3>No devices yet</h3><p>Add your first virtual GPS device to begin the simulation.</p><button class="primary" onclick={()=>showAdd=true}>＋ Add Device</button></div>
-      {:else}
-        <div class="table-wrap"><table><thead><tr><th>Device</th><th>IMEI</th><th>Model</th><th>Status</th><th>Speed</th><th>Last position</th><th></th></tr></thead><tbody>{#each devices as device (device.id)}<tr><td><button class="device-name" onclick={()=>selected=device}><span class="device-icon">⌁</span><span><strong>{device.name}</strong><small>#{String(device.id).padStart(4,'0')}</small></span></button></td><td class="mono">{device.imei}</td><td>{device.model}</td><td><span class:online={device.status==='online'} class="badge"><i></i>{device.status}</span></td><td>{Math.round(device.speed)} km/h</td><td class="mono">{device.latitude.toFixed(5)}, {device.longitude.toFixed(5)}</td><td><div class="actions">{#if device.status==='online'}<button class="stop" onclick={()=>void stop(device)}>Stop</button>{:else}<button class="start" onclick={()=>void start(device)}>Start</button>{/if}<button class="more" onclick={()=>selected=device}>•••</button></div></td></tr>{/each}</tbody></table></div>
-      {/if}
-    </section>
-  </main>
-</div>
 
+  <div class="workspace">
+    <div class="topbar">
+      <div class="topbar-state"><span class:ok={health?.database_ready}></span>{health?.database_ready?'Simulator ready':'Checking runtime'}</div>
+      <div class="admin-profile">
+        <div class="avatar">SA</div>
+        <div class="admin-copy"><strong>Simulator Administrator</strong><span>Administrator</span></div>
+        <span class="chevron">⌄</span>
+      </div>
+    </div>
+
+    <main>
+      <header>
+        <div><h1>Devices</h1><p class="subtitle">Virtual GPS devices for telemetry simulation and integration testing.</p></div>
+        <button class="primary" onclick={()=>showAdd=true}>＋ Add device</button>
+      </header>
+
+      <section class="stats" aria-label="Simulator summary">
+        <article><span>⌁ &nbsp;Devices</span><strong>{devices.length}</strong><small>{devices.length===1?'1 virtual unit':'Virtual units registered'}</small></article>
+        <article><span>◉ &nbsp;Online</span><strong>{devices.filter(d=>d.status==='online').length}</strong><small>Currently marked online</small></article>
+        <article><span>⇄ &nbsp;Transmitting</span><strong>{devices.filter(d=>d.status==='online').length}</strong><small>Telemetry cadence ~3s</small></article>
+        <article><span>♡ &nbsp;Runtime</span><strong class="runtime">{health?.database_ready?'Ready':'Checking'}</strong><small>{message}</small></article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div><h2>Devices</h2><p>Manage virtual Teltonika-style devices and inspect their latest telemetry.</p></div>
+          <button class="ghost" onclick={()=>void refresh()}>↻ Refresh</button>
+        </div>
+        {#if devices.length===0}
+          <div class="empty"><div class="empty-icon">⌁</div><h3>No devices yet</h3><p>Add your first virtual GPS device to begin the simulation.</p><button class="primary" onclick={()=>showAdd=true}>＋ Add device</button></div>
+        {:else}
+          <div class="table-wrap"><table><thead><tr><th>Device</th><th>IMEI</th><th>Model</th><th>Status</th><th>Speed</th><th>Last position</th><th></th></tr></thead><tbody>{#each devices as device (device.id)}<tr><td><button class="device-name" onclick={()=>selected=device}><span class="device-icon">⌁</span><span><strong>{device.name}</strong><small>Device #{String(device.id).padStart(4,'0')}</small></span></button></td><td class="mono">{device.imei}</td><td>{device.model}</td><td><span class:online={device.status==='online'} class="badge"><i></i>{device.status}</span></td><td>{Math.round(device.speed)} km/h</td><td class="mono">{device.latitude.toFixed(5)}, {device.longitude.toFixed(5)}</td><td><div class="actions">{#if device.status==='online'}<button class="stop" onclick={()=>void stop(device)}>Stop</button>{:else}<button class="start" onclick={()=>void start(device)}>Start</button>{/if}<button class="more" aria-label={`Open ${device.name}`} onclick={()=>selected=device}>•••</button></div></td></tr>{/each}</tbody></table></div>
+        {/if}
+      </section>
+    </main>
+  </div>
+</div>
 {#if showAdd}<div class="backdrop" role="presentation" onclick={(e)=>{if(e.currentTarget===e.target)showAdd=false}}><form class="modal" onsubmit={(e)=>{e.preventDefault();void addDevice()}}><div class="modal-head"><div><p class="eyebrow">NEW SIMULATOR</p><h2>Add device</h2></div><button type="button" class="close" onclick={()=>showAdd=false}>×</button></div><label>Device name<input bind:value={name} placeholder="Truck 01" autofocus /></label><label>IMEI / Device ID<input bind:value={imei} placeholder="352093081234567" /></label><label>Device model<select bind:value={model}><option>Teltonika FMC920</option><option>Teltonika FMB920</option><option>Teltonika FMC130</option><option>Generic GPS Tracker</option></select></label><p class="hint">Each device follows a repeatable Jakarta demo route and emits telemetry every 3 seconds while online.</p><div class="modal-actions"><button type="button" class="ghost" onclick={()=>showAdd=false}>Cancel</button><button class="primary" disabled={saving||!name.trim()||!imei.trim()}>{saving?'Creating…':'Create Device'}</button></div></form></div>{/if}
 {#if selected}
   {@const map=mapGeometry(selected)}
