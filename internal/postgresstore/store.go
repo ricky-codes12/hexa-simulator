@@ -64,3 +64,110 @@ func (s *Store) DeleteDevice(ctx context.Context, id int64) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM devices WHERE id=$1`, id)
 	return err
 }
+
+func (s *Store) EnsureAdmin(ctx context.Context, email, displayName, passwordHash string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO simulator_users(email,display_name,role,password_hash) VALUES($1,$2,'administrator',$3) ON CONFLICT(email) DO NOTHING`, email, displayName, passwordHash)
+	return err
+}
+func scanUser(row interface{ Scan(...any) error }) (httpapi.User, error) {
+	var u httpapi.User
+	err := row.Scan(&u.ID, &u.Email, &u.DisplayName, &u.Role, &u.PasswordHash, &u.MFASecret, &u.MFAEnabled)
+	return u, err
+}
+func (s *Store) UserByEmail(ctx context.Context, email string) (httpapi.User, error) {
+	return scanUser(s.db.QueryRowContext(ctx, `SELECT id,email,display_name,role,password_hash,mfa_secret,mfa_enabled FROM simulator_users WHERE email=$1`, email))
+}
+func (s *Store) UserByID(ctx context.Context, id int64) (httpapi.User, error) {
+	return scanUser(s.db.QueryRowContext(ctx, `SELECT id,email,display_name,role,password_hash,mfa_secret,mfa_enabled FROM simulator_users WHERE id=$1`, id))
+}
+func (s *Store) ListUsers(ctx context.Context) ([]httpapi.User, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,email,display_name,role,password_hash,mfa_secret,mfa_enabled FROM simulator_users ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []httpapi.User
+	for rows.Next() {
+		u, err := scanUser(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+func (s *Store) CreateUser(ctx context.Context, email, name, role, passwordHash string) (httpapi.User, error) {
+	return scanUser(s.db.QueryRowContext(ctx, `INSERT INTO simulator_users(email,display_name,role,password_hash) VALUES($1,$2,$3,$4) RETURNING id,email,display_name,role,password_hash,mfa_secret,mfa_enabled`, email, name, role, passwordHash))
+}
+func (s *Store) UpdatePassword(ctx context.Context, id int64, h string) error {
+	_, e := s.db.ExecContext(ctx, `UPDATE simulator_users SET password_hash=$2,updated_at=now() WHERE id=$1`, id, h)
+	return e
+}
+func (s *Store) UpdateMFA(ctx context.Context, id int64, secret string, enabled bool) error {
+	_, e := s.db.ExecContext(ctx, `UPDATE simulator_users SET mfa_secret=$2,mfa_enabled=$3,updated_at=now() WHERE id=$1`, id, secret, enabled)
+	return e
+}
+func (s *Store) CreateSession(ctx context.Context, x httpapi.Session) error {
+	_, e := s.db.ExecContext(ctx, `INSERT INTO simulator_sessions(token_hash,user_id,csrf_token,user_agent,ip_address,created_at,last_seen_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, x.TokenHash, x.UserID, x.CSRFToken, x.UserAgent, x.IPAddress, x.CreatedAt, x.LastSeenAt, x.ExpiresAt)
+	return e
+}
+func scanSession(row interface{ Scan(...any) error }) (httpapi.Session, error) {
+	var x httpapi.Session
+	e := row.Scan(&x.TokenHash, &x.UserID, &x.CSRFToken, &x.UserAgent, &x.IPAddress, &x.CreatedAt, &x.LastSeenAt, &x.ExpiresAt)
+	return x, e
+}
+func (s *Store) SessionByHash(ctx context.Context, h string) (httpapi.Session, error) {
+	return scanSession(s.db.QueryRowContext(ctx, `SELECT token_hash,user_id,csrf_token,user_agent,ip_address,created_at,last_seen_at,expires_at FROM simulator_sessions WHERE token_hash=$1`, h))
+}
+func (s *Store) TouchSession(ctx context.Context, h string) error {
+	_, e := s.db.ExecContext(ctx, `UPDATE simulator_sessions SET last_seen_at=now() WHERE token_hash=$1`, h)
+	return e
+}
+func (s *Store) DeleteSession(ctx context.Context, h string) error {
+	_, e := s.db.ExecContext(ctx, `DELETE FROM simulator_sessions WHERE token_hash=$1`, h)
+	return e
+}
+func (s *Store) DeleteUserSessions(ctx context.Context, id int64, except string) error {
+	_, e := s.db.ExecContext(ctx, `DELETE FROM simulator_sessions WHERE user_id=$1 AND token_hash<>$2`, id, except)
+	return e
+}
+func (s *Store) ListSessions(ctx context.Context, id int64) ([]httpapi.Session, error) {
+	rows, e := s.db.QueryContext(ctx, `SELECT token_hash,user_id,csrf_token,user_agent,ip_address,created_at,last_seen_at,expires_at FROM simulator_sessions WHERE user_id=$1 ORDER BY last_seen_at DESC`, id)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	var out []httpapi.Session
+	for rows.Next() {
+		x, e := scanSession(rows)
+		if e != nil {
+			return nil, e
+		}
+		out = append(out, x)
+	}
+	return out, rows.Err()
+}
+func (s *Store) ReplaceRecoveryCodes(ctx context.Context, id int64, codes []string) error {
+	tx, e := s.db.BeginTx(ctx, nil)
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback()
+	if _, e = tx.ExecContext(ctx, `DELETE FROM simulator_recovery_codes WHERE user_id=$1`, id); e != nil {
+		return e
+	}
+	for _, c := range codes {
+		if _, e = tx.ExecContext(ctx, `INSERT INTO simulator_recovery_codes(user_id,code_hash) VALUES($1,$2)`, id, c); e != nil {
+			return e
+		}
+	}
+	return tx.Commit()
+}
+func (s *Store) UseRecoveryCode(ctx context.Context, id int64, h string) (bool, error) {
+	res, e := s.db.ExecContext(ctx, `UPDATE simulator_recovery_codes SET used_at=now() WHERE user_id=$1 AND code_hash=$2 AND used_at IS NULL`, id, h)
+	if e != nil {
+		return false, e
+	}
+	n, e := res.RowsAffected()
+	return n == 1, e
+}

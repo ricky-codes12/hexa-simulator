@@ -33,3 +33,9 @@ Read `AGENTS.md` and `docs/architecture/ARCHITECTURE.md` before extending the pr
 hexa-simulator is the HTTP client for this integration. For each persisted online telemetry update it POSTs `hexa.sensor/telemetry/v1` JSON to `SIM_SENSOR_PUSH_URL` and authenticates with `Authorization: Bearer <SIM_SENSOR_PUSH_KEY>`. Configure both values only in protected environment configuration.
 
 The HTTP Push integration is optional: when `SIM_SENSOR_PUSH_URL` and `SIM_SENSOR_PUSH_KEY` are both absent, standalone simulator behavior is unchanged. The existing optional Teltonika TCP client remains available independently through `TELTONIKA_GATEWAY_ADDR` for protocol-level testing against an external compatible Gateway.
+
+## Simulator authentication and security
+
+When PostgreSQL is configured, the simulator API is protected by server-side authentication. Configure `SIM_ADMIN_PASSWORD` (minimum 12 characters) and `SIM_SECURITY_KEY` (minimum 32 characters) in protected runtime configuration before startup; `SIM_ADMIN_EMAIL` defaults to `admin@simulator.local`. The first startup creates the administrator account if it does not already exist.
+
+The application uses HttpOnly SameSite=Strict server-side sessions, CSRF tokens for state-changing API requests, PBKDF2-HMAC-SHA256 password hashing with per-password random salts, optional TOTP MFA with encrypted-at-rest secrets, one-time recovery codes, administrator/operator/viewer roles, security response headers, password changes, and session inventory. Device, telemetry, delete, and Sensor onboarding endpoints require an authenticated session. For production exposure, terminate the application behind HTTPS/TLS and set `SIM_COOKIE_SECURE=true` when served through HTTPS; local Hexa.Build development can use `false` on loopback HTTP.
