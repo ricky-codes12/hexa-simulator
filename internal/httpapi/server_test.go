@@ -1,8 +1,11 @@
 package httpapi
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -134,6 +137,54 @@ func TestGatewayFailureIsVisible(t *testing.T) {
 	r := httptest.NewRecorder()
 	h.ServeHTTP(r, httptest.NewRequest(http.MethodPost, "/api/devices/1/telemetry", strings.NewReader(`{"status":"online","latitude":-6.2,"longitude":106.8,"speed":42,"heading":90,"ignition":true}`)))
 	if r.Code != http.StatusBadGateway || !strings.Contains(r.Body.String(), "gateway unavailable") {
+		t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
+	}
+}
+
+func TestSensorOnboardingZIP(t *testing.T) {
+	s := &fakeStore{items: []Device{{ID: 2, Name: "Truck Test 01", IMEI: "352093081234568", Model: "Teltonika FMC920", Status: "offline"}}}
+	h := Handler("test", s, "")
+	r := httptest.NewRecorder()
+	h.ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/api/devices/2/sensor-onboarding.zip", nil))
+	if r.Code != http.StatusOK || r.Header().Get("Content-Type") != "application/zip" {
+		t.Fatalf("status=%d type=%s body=%s", r.Code, r.Header().Get("Content-Type"), r.Body.String())
+	}
+	zr, err := zip.NewReader(bytes.NewReader(r.Body.Bytes()), int64(r.Body.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(zr.File) != 4 {
+		t.Fatalf("files=%d", len(zr.File))
+	}
+	contents := map[string]string{}
+	for _, file := range zr.File {
+		rc, err := file.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(rc)
+		_ = rc.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		contents[file.Name] = string(data)
+	}
+	if !strings.Contains(contents["02_devices.csv"], "352093081234568,teltonika-fmc920-test") {
+		t.Fatalf("devices csv=%q", contents["02_devices.csv"])
+	}
+	if !strings.Contains(contents["03_assets.csv"], "TRUCK-TEST-01,Truck,Truck Test 01,,DEMO-ESTATE") {
+		t.Fatalf("assets csv=%q", contents["03_assets.csv"])
+	}
+	if !strings.Contains(contents["04_assignments.csv"], "352093081234568,TRUCK-TEST-01,") {
+		t.Fatalf("assignments csv=%q", contents["04_assignments.csv"])
+	}
+}
+
+func TestSensorOnboardingZIPMissingDevice(t *testing.T) {
+	h := Handler("test", &fakeStore{}, "")
+	r := httptest.NewRecorder()
+	h.ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/api/devices/99/sensor-onboarding.zip", nil))
+	if r.Code != http.StatusNotFound {
 		t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
 	}
 }

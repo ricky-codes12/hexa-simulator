@@ -9,3 +9,5 @@
 .map-controls{z-index:6}.map-controls button:disabled{opacity:.35;cursor:not-allowed}.map-controls button.control-active{color:#a98aff;background:#211d40}.map-device-pop,.map-legend,.map-runtime,.map-empty{z-index:5}
 .panel-tools button{border-radius:6px}.panel-tools button:hover{background:#1a2131;color:#d9ddea}
 @media(max-height:760px) and (min-width:761px){main{padding-top:12px;padding-bottom:12px}.live-page-head{margin-bottom:10px}.live-workbench{height:calc(100dvh - 130px);min-height:480px}.live-sidebar-head{padding-top:14px;padding-bottom:10px}.filter-chips{margin-bottom:12px}.selected-telemetry{padding-top:8px;padding-bottom:8px}}
+
+.sensor-export{border:1px solid #5f46b8;border-radius:8px;background:#211b3d;color:#bca8ff;cursor:pointer;padding:7px 9px;font-size:10px}.sensor-export:hover{background:#2b2350}.device-actions{flex-wrap:wrap}.device-actions .sensor-export{flex:1 0 100%}
