@@ -12,6 +12,8 @@ The simulator remains standalone by default. To forward online telemetry to a Te
 
 ## HEXA.SENSOR integration
 
-For HTTP Push development, configure `SIM_SENSOR_PUSH_URL` and `SIM_SENSOR_PUSH_KEY` together in the local/protected environment. `SIM_SENSOR_PUSH_URL` is the full Hexa.Sensor connector endpoint (for example a local `/ingest/v1/<instance>` URL); `SIM_SENSOR_PUSH_KEY` is the connector ingest key and is sent as a Bearer credential. `SIM_SENSOR_PUSH_TIMEOUT` is optional and defaults to `5s`. Never commit the real key.
+For HTTP Push development, configure `SIM_SENSOR_PUSH_URL` and `SIM_SENSOR_PUSH_KEY` together in the local/protected environment. `SIM_SENSOR_PUSH_URL` is the full Hexa.Sensor connector endpoint (for example a local `/ingest/v1/<instance>` URL); `SIM_SENSOR_PUSH_KEY` is the connector ingest key and is sent as a Bearer credential. `SIM_SENSOR_PUSH_TIMEOUT` is optional and defaults to `5s`. Never commit the real key. These three names are declared in `.hexa/project.yaml` so Hexa.Build may pass protected values into the project adapter; the adapter writes development push credentials only to its mode-0600 project-state environment file and Runtime continues to consume them from `RUNTIME_ENV_FILE`.
+
+The canonical local development endpoints are `http://127.0.0.1:5173` for the Vite UI and `http://127.0.0.1:8080` for the Go API. Vite proxies `/api` and `/healthz` to that API. When debugging UI/API consistency, test `127.0.0.1:8080`; another listening port is a different process and is not authoritative for `.hexa/project dev`.
 
 With these values absent, no HTTP Push forwarder is enabled.
