@@ -1,5 +1,10 @@
 <script lang="ts">
   import QRCode from 'qrcode';
+  import { Map as MapLibreMap, Marker, NavigationControl } from 'maplibre-gl';
+  import type { GeoJSONSource } from 'maplibre-gl';
+  import 'maplibre-gl/dist/maplibre-gl.css';
+  import { forestryStyle } from './lib/live/mapstyle';
+  import { FORESTRY_BOUNDS, FORESTRY_ROUTES } from './lib/live/world';
   type Health = { revision: string; database_configured: boolean; database_ready: boolean };
   type Device = { id:number; name:string; imei:string; model:string; status:'online'|'offline'; latitude:number; longitude:number; speed:number; heading:number; ignition:boolean; updated_at:string };
   type RoutePoint = { latitude:number; longitude:number; speed:number; heading:number };
@@ -33,51 +38,62 @@
   $effect(()=>{const saved=localStorage.getItem('sim-theme');if(saved==='system'||saved==='light'||saved==='dark')theme=saved;document.documentElement.dataset.theme=theme;const savedLanguage=localStorage.getItem('sim-language');if(savedLanguage==='id'||savedLanguage==='en')language=savedLanguage;const clock=setInterval(()=>now=new Date(),1000);return()=>clearInterval(clock)});
 
 
-  const routes:RoutePoint[][] = [
-    [
-      {latitude:-6.20880,longitude:106.84560,speed:24,heading:88},
-      {latitude:-6.20872,longitude:106.84710,speed:31,heading:91},
-      {latitude:-6.20866,longitude:106.84870,speed:38,heading:89},
-      {latitude:-6.20855,longitude:106.85020,speed:34,heading:86},
-      {latitude:-6.20792,longitude:106.85135,speed:28,heading:42},
-      {latitude:-6.20685,longitude:106.85182,speed:22,heading:18},
-      {latitude:-6.20570,longitude:106.85162,speed:27,heading:350},
-      {latitude:-6.20475,longitude:106.85080,speed:33,heading:318}
-    ],
-    [
-      {latitude:-6.28455,longitude:106.82310,speed:18,heading:5},
-      {latitude:-6.28335,longitude:106.82325,speed:26,heading:8},
-      {latitude:-6.28205,longitude:106.82360,speed:35,heading:14},
-      {latitude:-6.28090,longitude:106.82420,speed:42,heading:25},
-      {latitude:-6.28010,longitude:106.82530,speed:30,heading:52},
-      {latitude:-6.27985,longitude:106.82665,speed:24,heading:78},
-      {latitude:-6.28020,longitude:106.82795,speed:29,heading:105},
-      {latitude:-6.28110,longitude:106.82885,speed:21,heading:138}
-    ]
-  ];
+  function headingBetween(a:readonly [number,number],b:readonly [number,number]){
+    const lat1=a[1]*Math.PI/180,lat2=b[1]*Math.PI/180,dlon=(b[0]-a[0])*Math.PI/180;
+    const y=Math.sin(dlon)*Math.cos(lat2),x=Math.cos(lat1)*Math.sin(lat2)-Math.sin(lat1)*Math.cos(lat2)*Math.cos(dlon);
+    return (Math.atan2(y,x)*180/Math.PI+360)%360;
+  }
+  const routes:RoutePoint[][]=FORESTRY_ROUTES.map(route=>route.map((point,index)=>{
+    const next=route[(index+1)%route.length];
+    return {latitude:point[1],longitude:point[0],speed:22+(index%4)*5,heading:headingBetween(point,next)};
+  }));
 
   let health=$state<Health|null>(null), devices=$state<Device[]>([]), selected=$state<Device|null>(null);
   let showAdd=$state(false), saving=$state(false), message=$state('Connecting…');
   let name=$state(''), imei=$state(''), model=$state('Teltonika FMC920');
-  let search=$state(''), mapZoom=$state(1), showMapLayer=$state(true);
-  let mapStage:HTMLDivElement|null=$state(null);
+  let search=$state(''), showMapLayer=$state(true);
+  let mapStage:HTMLDivElement|null=$state(null), mapContainer:HTMLDivElement|null=$state(null);
+  let liveMap:MapLibreMap|null=null, liveMarker:Marker|null=null, animationFrame=0;
+  let renderedPosition:{lng:number;lat:number;heading:number}|null=null, trailByDevice=new Map<number,[number,number][]>();
   let timers=new Map<number,ReturnType<typeof setInterval>>(), routeSteps=new Map<number,number>();
 
   function routeFor(device:Device){ return routes[(device.id-1)%routes.length]; }
   function nextPoint(device:Device){ const route=routeFor(device); const step=routeSteps.get(device.id)??0; routeSteps.set(device.id,(step+1)%route.length); return route[step%route.length]; }
   function syncSelected(){ if(selected) selected=devices.find(d=>d.id===selected?.id)??null; }
-  function mapGeometry(device:Device){
-    const route=routeFor(device); const points=[...route,{...route[0]}];
-    const lats=points.map(p=>p.latitude), lngs=points.map(p=>p.longitude);
-    const minLat=Math.min(...lats), maxLat=Math.max(...lats), minLng=Math.min(...lngs), maxLng=Math.max(...lngs);
-    const pad=24, width=640, height=300, latSpan=Math.max(maxLat-minLat,.0001), lngSpan=Math.max(maxLng-minLng,.0001);
-    const project=(latitude:number,longitude:number)=>({x:pad+((longitude-minLng)/lngSpan)*(width-pad*2),y:pad+((maxLat-latitude)/latSpan)*(height-pad*2)});
-    const routePoints=points.map(p=>{const q=project(p.latitude,p.longitude);return `${q.x.toFixed(1)},${q.y.toFixed(1)}`}).join(' ');
-    const marker=project(device.latitude,device.longitude); return {routePoints,marker,width,height};
+  function shortestHeading(from:number,to:number){return ((to-from+540)%360)-180}
+  function markerElement(){const el=document.createElement('div');el.className='maplibre-device-marker';el.innerHTML='<span></span>';return el}
+  function updateTrail(device:Device,lng:number,lat:number){
+    const trail=trailByDevice.get(device.id)??[];const last=trail[trail.length-1];
+    if(!last||Math.abs(last[0]-lng)>1e-7||Math.abs(last[1]-lat)>1e-7){trail.push([lng,lat]);if(trail.length>200)trail.splice(0,trail.length-200);trailByDevice.set(device.id,trail)}
+    const source=liveMap?.getSource('trail') as GeoJSONSource|undefined;
+    source?.setData({type:'Feature',properties:{},geometry:{type:'LineString',coordinates:trail}});
+  }
+  function animateMarker(device:Device){
+    if(!liveMap||!liveMarker)return;const target={lng:device.longitude,lat:device.latitude,heading:device.heading};
+    if(!renderedPosition){renderedPosition=target;liveMarker.setLngLat([target.lng,target.lat]);liveMarker.setRotation(target.heading);updateTrail(device,target.lng,target.lat);return}
+    cancelAnimationFrame(animationFrame);const from={...renderedPosition},started=performance.now(),duration=device.status==='online'?2800:350;
+    const headingDelta=shortestHeading(from.heading,target.heading);
+    const tick=(time:number)=>{const raw=Math.min(1,(time-started)/duration),t=raw<.5?2*raw*raw:1-Math.pow(-2*raw+2,2)/2;
+      renderedPosition={lng:from.lng+(target.lng-from.lng)*t,lat:from.lat+(target.lat-from.lat)*t,heading:(from.heading+headingDelta*t+360)%360};
+      liveMarker?.setLngLat([renderedPosition.lng,renderedPosition.lat]);liveMarker?.setRotation(renderedPosition.heading);
+      if(raw<1)animationFrame=requestAnimationFrame(tick);else updateTrail(device,target.lng,target.lat)};
+    animationFrame=requestAnimationFrame(tick);
+  }
+  function ensureMap(){
+    if(!mapContainer||liveMap)return;
+    const map=new MapLibreMap({container:mapContainer,style:forestryStyle(),bounds:FORESTRY_BOUNDS,fitBoundsOptions:{padding:24},attributionControl:false,maxBounds:FORESTRY_BOUNDS});
+    map.addControl(new NavigationControl({showCompass:true}),'top-right');
+    map.on('load',()=>{if(selected)animateMarker(selected)});
+    liveMap=map;
+  }
+  function syncMapDevice(device:Device|null){
+    ensureMap();if(!liveMap||!device)return;
+    if(!liveMarker){liveMarker=new Marker({element:markerElement(),rotationAlignment:'map',pitchAlignment:'map'}).setLngLat([device.longitude,device.latitude]).addTo(liveMap)}
+    animateMarker(device);
   }
   function updatedLabel(value:string){ const date=new Date(value); return Number.isNaN(date.getTime())?'Waiting for telemetry':date.toLocaleString(); }
   function visibleDevices(){ const q=search.trim().toLowerCase(); return q?devices.filter(d=>[d.name,d.imei,d.model].some(v=>v.toLowerCase().includes(q))):devices; }
-  function zoomMap(delta:number){ mapZoom=Math.min(1.8,Math.max(1,mapZoom+delta)); }
+  function toggleContextLayer(){showMapLayer=!showMapLayer;if(!liveMap)return;for(const id of ['estate-fill','estate-outline','conservation-fill','conservation-outline','facility-area','roads-shadow','roads','facilities','facility-labels','labels'])if(liveMap.getLayer(id))liveMap.setLayoutProperty(id,'visibility',showMapLayer?'visible':'none')}
   async function toggleMapFullscreen(){ if(!mapStage)return; if(document.fullscreenElement===mapStage) await document.exitFullscreen(); else await mapStage.requestFullscreen(); }
 
   async function refresh(){
@@ -128,7 +144,9 @@
     const r=await apiFetch(`/api/devices/${device.id}`,{method:'DELETE'}); if(!r.ok){message='Unable to delete device';return}
     timers.delete(device.id);routeSteps.delete(device.id);selected=null;await refresh();message=`${device.name} deleted`;
   }
-  $effect(()=>{void loadMe().then(()=>{if(user?.mfa_enabled)void refresh()}); return()=>{for(const timer of timers.values())clearInterval(timer)}});
+  $effect(()=>{if(mapContainer){ensureMap();syncMapDevice(selected)}});
+  $effect(()=>{if(selected)syncMapDevice(selected)});
+  $effect(()=>{void loadMe().then(()=>{if(user?.mfa_enabled)void refresh()}); return()=>{for(const timer of timers.values())clearInterval(timer);cancelAnimationFrame(animationFrame);liveMap?.remove();liveMap=null;liveMarker=null}});
 </script>
 
 {#if !authChecked}<div class="auth-screen"><div class="auth-loading"><div class="login-brand">Hexa.Simulator</div><p>Checking secure session…</p></div></div>{:else if !user || authStep==='setup' || authStep==='recovery'}<div class="auth-screen auth-layout"><section class="auth-hero"><div class="auth-brand"><span class="auth-logo">H+</span><strong>Hexa.Simulator</strong></div><div class="auth-hero-copy"><span class="eyebrow">Virtual telemetry. Real integration confidence.</span><h1>{authStep==='setup'?'Secure your simulator.':authStep==='recovery'?'Keep a safe way back in.':authStep==='mfa'?'A second check. A safer workspace.':'Simulate every signal before it reaches the field.'}</h1><p>{authStep==='setup'?'Connect an authenticator app before entering your workspace.':authStep==='recovery'?'Save your recovery codes somewhere secure before continuing.':'Create virtual GPS devices, stream deterministic telemetry and validate Hexa.Sensor integrations from one workspace.'}</p><div class="signal-orbit"><span>Devices</span><span>Telemetry</span><span>Sensor push</span><i></i></div></div><small>Hexa.Simulator · Secure workspace</small></section><section class="auth-panel"><div class="auth-card">{#if authStep==='password'}<span class="eyebrow">Welcome to your workspace</span><h2>Sign in</h2><p>Enter your administrator account details to continue.</p><form onsubmit={(e)=>{e.preventDefault();void login()}}><label>Email<input bind:value={loginEmail} autocomplete="username" /></label><label>Password<input type="password" bind:value={loginPassword} autocomplete="current-password" /></label>{#if authError}<div class="auth-error">{authError}</div>{/if}<button class="primary auth-submit">Continue</button></form>{:else if authStep==='mfa'}<span class="eyebrow">Identity check · Step 2 of 2</span><h2>Two-factor verification</h2><p>Enter the 6-digit code from your authenticator app, or use a recovery code.</p><form onsubmit={(e)=>{e.preventDefault();void login()}}><label>Authentication code<input class="code-input" bind:value={loginCode} autocomplete="one-time-code" inputmode="numeric" maxlength="32" placeholder="000000" autofocus /></label>{#if authError}<div class="auth-error">{authError}</div>{/if}<button class="primary auth-submit">Verify</button><button type="button" class="auth-link" onclick={()=>void backToPassword()}>Sign in as someone else</button></form>{:else if authStep==='setup'}<span class="eyebrow">Authenticator setup · Required</span><h2>Scan your QR code</h2><p>Scan this code with Google Authenticator, Microsoft Authenticator, 2FAS, or another TOTP app.</p>{#if mfaSetup}<div class="qr-wrap">{#if mfaQR}<img src={mfaQR} alt="Authenticator QR code" />{/if}<div><small>Can't scan it? Enter this setup key:</small><code>{mfaSetup.secret}</code></div></div><form onsubmit={(e)=>{e.preventDefault();void enableMFA()}}><label>6-digit authentication code<input class="code-input" bind:value={mfaCode} autocomplete="one-time-code" inputmode="numeric" maxlength="6" placeholder="000000" /></label>{#if setupError}<div class="auth-error">{setupError}</div>{/if}<button class="primary auth-submit">Verify and enable MFA</button></form>{:else}<p>Preparing secure QR code…</p>{/if}{:else}<span class="eyebrow">MFA enabled</span><h2>Save your recovery codes</h2><p>Each code can be used once if your authenticator is unavailable.</p><div class="recovery-grid">{#each recovery as code}<code>{code}</code>{/each}</div><button class="primary auth-submit" onclick={()=>{authStep='password';loginPassword='';void refresh()}}>Continue to Simulator</button>{/if}</div><div class="platform-ready"><span>●</span> Platform ready</div></section></div>{:else}<div class="shell">
@@ -204,36 +222,18 @@
         </aside>
 
         <div class="sensor-map-stage" bind:this={mapStage}>
+          <div class="maplibre-host" bind:this={mapContainer} aria-label={selected?`Live forestry map position for ${selected.name}`:'Live forestry map'}></div>
           {#if selected}
-            {@const map=mapGeometry(selected)}
-            <svg class="sensor-map" class:map-zoomed={mapZoom>1} style={`--map-zoom:${mapZoom}`} viewBox={`0 0 ${map.width} ${map.height}`} preserveAspectRatio="xMidYMid meet" role="img" aria-label={`Live map position for ${selected.name}`}>
-              <defs>
-                <pattern id="sensorGrid" width="42" height="42" patternUnits="userSpaceOnUse"><path d="M42 0H0V42" fill="none" /></pattern>
-                <linearGradient id="mapGlow" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0b1718"/><stop offset="1" stop-color="#081016"/></linearGradient>
-              </defs>
-              <rect width="100%" height="100%" fill="url(#mapGlow)"/>
-              {#if showMapLayer}
-                <path d="M0 82 L115 70 L205 83 L310 65 L420 80 L535 74 L640 91" class="map-road major"/>
-                <path d="M36 248 L90 210 L150 220 L204 190 L250 198 L308 156 L370 165 L430 140 L500 160 L590 135" class="map-road"/>
-                <path d="M70 108 H570 V260 H70 Z" class="operating-area"/>
-                <rect x="70" y="108" width="500" height="152" fill="url(#sensorGrid)" class="sensor-grid"/>
-              {/if}
-              <polyline points={map.routePoints} class="trail-shadow"/><polyline points={map.routePoints} class="sensor-trail"/>
-              <circle cx={map.marker.x} cy={map.marker.y} r="15" class:marker-online={selected.status==='online'} class="marker-pulse"/>
-              <g transform={`translate(${map.marker.x} ${map.marker.y}) rotate(${selected.heading})`} class="sensor-vehicle"><path d="M0 -11 L8 9 L0 5 L-8 9 Z"/></g>
-              <text x="88" y="132" class="map-label">Jakarta Demo Route</text>
-              <text x="455" y="238" class="map-label subtle">Hexa.Simulator</text>
-            </svg>
             <div class="map-device-pop"><span class="map-pop-arrow">▲</span><div><strong>{selected.name}</strong><small>{Math.round(selected.speed)} km/h · {Math.round(selected.heading)}°</small></div></div>
           {:else}
             <div class="map-empty"><span>⌁</span><strong>No device selected</strong><small>Add or select a virtual device to view its live position.</small></div>
           {/if}
-          <div class="map-controls"><button aria-label="Zoom in" title="Zoom in" onclick={()=>zoomMap(.2)} disabled={mapZoom>=1.8}>＋</button><button aria-label="Zoom out" title="Zoom out" onclick={()=>zoomMap(-.2)} disabled={mapZoom<=1}>−</button><button aria-label="Fullscreen map" title="Fullscreen map" onclick={()=>void toggleMapFullscreen()}>⌗</button><button class:control-active={showMapLayer} aria-label="Toggle map context layer" title="Toggle map context layer" onclick={()=>showMapLayer=!showMapLayer}>▱</button></div>
-          <div class="map-legend"><span><i class="legend-operating"></i> Demo area</span><span><i class="legend-trail"></i> Trail</span><span><i class="legend-device"></i> Device</span><em>Virtual demo geography</em></div>
-          <div class="map-runtime"><i class:ok={health?.database_ready}></i>{health?.database_ready?'Runtime ready':'Runtime unavailable'}<span>·</span><span>~3s telemetry</span></div>
+          <div class="map-controls simulator-controls"><button class:control-active={showMapLayer} aria-label="Toggle map context layer" title="Toggle map context layer" onclick={toggleContextLayer}>▱</button><button aria-label="Fullscreen map" title="Fullscreen map" onclick={()=>void toggleMapFullscreen()}>⌗</button></div>
+          <div class="map-legend"><span><i class="legend-operating"></i> Estate boundary</span><span><i class="legend-trail"></i> Live trail</span><span><i class="legend-device"></i> Device</span><em>Offline synthetic forestry world</em></div>
+          <div class="map-runtime"><i class:ok={health?.database_ready}></i>{health?.database_ready?'Runtime ready':'Runtime unavailable'}<span>·</span><span>~3s telemetry · smooth render</span></div>
         </div>
       </section>
     </main>{:else if view==='security'}<main class="settings-main"><header><h1>Security</h1><p class="subtitle">Your password, two-factor authentication and the places you are signed in.</p></header><section class="settings-card"><h2>Two-factor authentication</h2><p>A code from your authenticator app protects every sign-in.</p><div class="setting-row"><span class:green={user.mfa_enabled}>{user.mfa_enabled?'● On':'○ Off'}</span><button class="ghost" disabled={user.mfa_enabled} onclick={()=>void setupMFA()}>Set up</button><button class="ghost" disabled={!user.mfa_enabled} onclick={()=>void regenerateRecovery()}>Regenerate recovery codes</button><button class="danger" disabled title="MFA is required for simulator accounts">Turn off</button></div>{#if mfaSetup}<div class="mfa-box"><strong>Scan with your authenticator</strong><div class="qr-wrap">{#if mfaQR}<img src={mfaQR} alt="Authenticator QR code" />{/if}<div><small>Can't scan it? Enter this setup key:</small><code>{mfaSetup.secret}</code></div></div><small>Enter the 6-digit code generated by your authenticator.</small><input bind:value={mfaCode} inputmode="numeric" maxlength="6" placeholder="123456" />{#if setupError}<div class="auth-error">{setupError}</div>{/if}<button class="primary" onclick={()=>void enableMFA()}>Enable MFA</button></div>{/if}{#if recovery.length}<div class="mfa-box"><strong>Recovery codes — save these now</strong><code>{recovery.join('  ')}</code></div>{/if}</section><section class="settings-card"><h2>Password</h2><label>Current password<input type="password" bind:value={currentPassword}/></label><label>New password<input type="password" bind:value={newPassword}/><small>At least 12 characters.</small></label><label>Repeat new password<input type="password" bind:value={repeatPassword}/></label><button class="primary" onclick={()=>void changePassword()}>Change password</button></section><section class="settings-card"><h2>Where you are signed in</h2>{#each sessions as s}<div class="session-row"><div><strong>{s.user_agent||'API tool'}</strong><small>{s.ip_address} · active {new Date(s.last_seen_at).toLocaleString()}</small></div><span>{new Date(s.expires_at).toLocaleString()} <button class="ghost mini" onclick={()=>void revokeSession(s.id)}>Revoke</button></span></div>{/each}</section></main>{:else}<main class="settings-main"><header><h1>Users and roles</h1><p class="subtitle">Accounts allowed to operate this simulator.</p></header><section class="settings-card"><h2>Add user</h2><div class="user-create"><input bind:value={newUserName} placeholder="Display name"/><input bind:value={newUserEmail} placeholder="Email"/><select bind:value={newUserRole}><option value="operator">Operator</option><option value="viewer">Viewer</option><option value="administrator">Administrator</option></select><input type="password" bind:value={newUserPassword} placeholder="Temporary password (12+ characters)"/><button class="primary" onclick={()=>void createUser()}>Create user</button></div></section><section class="settings-card"><div class="user-table"><div class="table-head"><span>User</span><span>Role</span><span>MFA</span></div>{#each users as u}<div class="table-row"><span><strong>{u.display_name}</strong><small>{u.email}</small></span><span>{u.role}</span><span class:green={u.mfa_enabled}>{u.mfa_enabled?'On':'Off'}</span></div>{/each}</div></section></main>{/if}
   </div>
 </div>{/if}
-{#if user && showAdd}<div class="backdrop" role="presentation" onclick={(e)=>{if(e.currentTarget===e.target)showAdd=false}}><form class="modal" onsubmit={(e)=>{e.preventDefault();void addDevice()}}><div class="modal-head"><div><p class="eyebrow">NEW SIMULATOR</p><h2>Add device</h2></div><button type="button" class="close" onclick={()=>showAdd=false}>×</button></div><label>Device name<input bind:value={name} placeholder="Truck 01" autofocus /></label><label>IMEI / Device ID<input bind:value={imei} placeholder="352093081234567" /></label><label>Device model<select bind:value={model}><option>Teltonika FMC920</option><option>Teltonika FMB920</option><option>Teltonika FMC130</option><option>Generic GPS Tracker</option></select></label><p class="hint">Each device follows a repeatable Jakarta demo route and emits telemetry every 3 seconds while online.</p><div class="modal-actions"><button type="button" class="ghost" onclick={()=>showAdd=false}>Cancel</button><button class="primary" disabled={saving||!name.trim()||!imei.trim()}>{saving?'Creating…':'Create Device'}</button></div></form></div>{/if}
+{#if user && showAdd}<div class="backdrop" role="presentation" onclick={(e)=>{if(e.currentTarget===e.target)showAdd=false}}><form class="modal" onsubmit={(e)=>{e.preventDefault();void addDevice()}}><div class="modal-head"><div><p class="eyebrow">NEW SIMULATOR</p><h2>Add device</h2></div><button type="button" class="close" onclick={()=>showAdd=false}>×</button></div><label>Device name<input bind:value={name} placeholder="Truck 01" autofocus /></label><label>IMEI / Device ID<input bind:value={imei} placeholder="352093081234567" /></label><label>Device model<select bind:value={model}><option>Teltonika FMC920</option><option>Teltonika FMB920</option><option>Teltonika FMC130</option><option>Generic GPS Tracker</option></select></label><p class="hint">Each device follows a repeatable synthetic forestry haul route aligned with Hexa.Sensor and emits telemetry every 3 seconds while online.</p><div class="modal-actions"><button type="button" class="ghost" onclick={()=>showAdd=false}>Cancel</button><button class="primary" disabled={saving||!name.trim()||!imei.trim()}>{saving?'Creating…':'Create Device'}</button></div></form></div>{/if}
