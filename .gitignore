@@ -1,4 +1,5 @@
 /bin/
+/.hexa-dev/
 /web/node_modules/
 /web/dist/
 /.cache/
