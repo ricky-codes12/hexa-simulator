@@ -49,6 +49,28 @@ func (s *Store) ListDevices(ctx context.Context) ([]httpapi.Device, error) {
 	}
 	return items, rows.Err()
 }
+
+func (s *Store) SearchDevices(ctx context.Context, query string, limit, offset int) ([]httpapi.Device, int, error) {
+	pattern := "%" + query + "%"
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM devices WHERE $1='' OR name ILIKE $2 OR imei ILIKE $2 OR model ILIKE $2`, query, pattern).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,imei,model,status,latitude,longitude,speed,heading,ignition,updated_at,created_at FROM devices WHERE $1='' OR name ILIKE $2 OR imei ILIKE $2 OR model ILIKE $2 ORDER BY updated_at DESC,id LIMIT $3 OFFSET $4`, query, pattern, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	items := []httpapi.Device{}
+	for rows.Next() {
+		var d httpapi.Device
+		if err := rows.Scan(&d.ID, &d.Name, &d.IMEI, &d.Model, &d.Status, &d.Latitude, &d.Longitude, &d.Speed, &d.Heading, &d.Ignition, &d.UpdatedAt, &d.CreatedAt); err != nil {
+			return nil, 0, err
+		}
+		items = append(items, d)
+	}
+	return items, total, rows.Err()
+}
 func (s *Store) CreateDevice(ctx context.Context, input httpapi.DeviceInput) (httpapi.Device, error) {
 	var d httpapi.Device
 	err := s.db.QueryRowContext(ctx, `INSERT INTO devices(name,imei,model) VALUES($1,$2,$3) RETURNING id,name,imei,model,status,latitude,longitude,speed,heading,ignition,updated_at,created_at`, input.Name, input.IMEI, input.Model).Scan(&d.ID, &d.Name, &d.IMEI, &d.Model, &d.Status, &d.Latitude, &d.Longitude, &d.Speed, &d.Heading, &d.Ignition, &d.UpdatedAt, &d.CreatedAt)

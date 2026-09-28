@@ -50,6 +50,10 @@ type TelemetryForwarder interface {
 	ForwardTelemetry(context.Context, Device) error
 }
 
+type DeviceSearchStore interface {
+	SearchDevices(context.Context, string, int, int) ([]Device, int, error)
+}
+
 type DeviceStore interface {
 	Ping(context.Context) error
 	ListDevices(context.Context) ([]Device, error)
@@ -82,12 +86,58 @@ func Handler(revision string, store DeviceStore, webRoot string, forwarders ...T
 			writeError(writer, http.StatusServiceUnavailable, "PostgreSQL is not configured; set DATABASE_URL")
 			return
 		}
+		query := strings.TrimSpace(request.URL.Query().Get("query"))
+		limit, offset := 0, 0
+		if raw := request.URL.Query().Get("limit"); raw != "" {
+			fmt.Sscanf(raw, "%d", &limit)
+		}
+		if raw := request.URL.Query().Get("offset"); raw != "" {
+			fmt.Sscanf(raw, "%d", &offset)
+		}
+		if limit > 0 {
+			if limit > 100 {
+				limit = 100
+			}
+			if offset < 0 {
+				offset = 0
+			}
+			if searchable, ok := store.(DeviceSearchStore); ok {
+				items, total, err := searchable.SearchDevices(request.Context(), query, limit, offset)
+				if err != nil {
+					writeError(writer, http.StatusInternalServerError, "load devices")
+					return
+				}
+				writeJSON(writer, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset})
+				return
+			}
+		}
 		items, err := store.ListDevices(request.Context())
 		if err != nil {
 			writeError(writer, http.StatusInternalServerError, "load devices")
 			return
 		}
-		writeJSON(writer, http.StatusOK, map[string]any{"items": items})
+		if query != "" {
+			q := strings.ToLower(query)
+			filtered := items[:0]
+			for _, item := range items {
+				if strings.Contains(strings.ToLower(item.Name), q) || strings.Contains(strings.ToLower(item.IMEI), q) || strings.Contains(strings.ToLower(item.Model), q) {
+					filtered = append(filtered, item)
+				}
+			}
+			items = filtered
+		}
+		total := len(items)
+		if limit > 0 {
+			end := offset + limit
+			if offset > total {
+				offset = total
+			}
+			if end > total {
+				end = total
+			}
+			items = items[offset:end]
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset})
 	})
 	mux.HandleFunc("POST /api/devices", func(writer http.ResponseWriter, request *http.Request) {
 		if store == nil {
