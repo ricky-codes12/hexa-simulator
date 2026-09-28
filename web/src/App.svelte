@@ -238,16 +238,13 @@
 
       <section class="live-workbench" aria-label={t('liveMap')}>
         <aside class="live-sidebar">
-          <div class="live-sidebar-head">
-            <div class="live-title-row"><h2>{t('liveMap')}</h2><div class="panel-tools"><button aria-label={t('fullscreen')} title={t('fullscreen')} onclick={()=>void toggleMapFullscreen()}>▣</button></div></div>
+          <div class="live-sidebar-head compact-live-head">
             <div class="live-now"><i></i><strong>{t('live')}</strong><span>{liveCopy()}</span></div>
-          </div>
-          <div class="live-sidebar-body device-picker-summary">
-            {#if selected}
-              <button class="change-device-button" onclick={()=>void openDeviceExplorer()}><span>⌕</span><span><strong>{t('changeDevice')}</strong><small>{t('searchPlaceholder')}</small></span><b>›</b></button>
-            {:else}
-              <button class="change-device-button empty" onclick={()=>void openDeviceExplorer()}><span>⌕</span><span><strong>{t('chooseDevice')}</strong><small>{t('searchPlaceholder')}</small></span><b>›</b></button>
-            {/if}
+            <button class:empty={!selected} class="header-device-selector" title={selected?t('changeDevice'):t('chooseDevice')} aria-label={selected?t('changeDevice'):t('chooseDevice')} onclick={()=>void openDeviceExplorer()}>
+              <span class:active-arrow={selected?.status==='online'} class="device-arrow">▲</span>
+              <span class="header-device-copy"><strong>{selected?.name||t('chooseDevice')}</strong><small>{selected?`${Math.round(selected.speed)} km/h · ${Math.round(selected.heading)}°`:t('searchPlaceholder')}</small></span>
+              <b>⌄</b>
+            </button>
           </div>
           {#if selected}
             <div class="selected-device-card">
