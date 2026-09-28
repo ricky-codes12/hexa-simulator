@@ -72,7 +72,7 @@
     const trail=trailByDevice.get(device.id)??[];const last=trail[trail.length-1];
     if(!last||Math.abs(last[0]-lng)>1e-7||Math.abs(last[1]-lat)>1e-7){trail.push([lng,lat]);if(trail.length>200)trail.splice(0,trail.length-200);trailByDevice.set(device.id,trail)}
     const source=liveMap?.getSource('trail') as GeoJSONSource|undefined;
-    source?.setData({type:'Feature',properties:{},geometry:{type:'LineString',coordinates:trail}});
+    if(source&&trail.length>1)source.setData({type:'Feature',properties:{},geometry:{type:'LineString',coordinates:trail}});
   }
   function animateMarker(device:Device){
     if(!liveMap||!liveMarker)return;const target={lng:device.longitude,lat:device.latitude,heading:device.heading};

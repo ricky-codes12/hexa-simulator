@@ -1,7 +1,9 @@
-import type { Map as MapLibreMap, StyleSpecification } from 'maplibre-gl';
+import { setWorkerUrl, type Map as MapLibreMap, type StyleSpecification } from 'maplibre-gl';
+import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url';
 import { worldAreas, worldFacilities, worldRoads } from './world';
 
-const emptyTrail = {type:'Feature' as const,properties:{},geometry:{type:'LineString' as const,coordinates:[] as [number,number][]}};
+const emptyTrail = {type:'FeatureCollection' as const,features:[]};
+setWorkerUrl(maplibreWorkerUrl);
 
 export function forestryStyle(): StyleSpecification {
   return {
