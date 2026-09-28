@@ -81,6 +81,10 @@ func SecureHandler(revision string, store DeviceStore, auth AuthStore, webRoot s
 			writeError(w, 401, "invalid email or password")
 			return
 		}
+		if u.MFAEnabled && strings.TrimSpace(in.Code) == "" {
+			writeJSON(w, http.StatusAccepted, map[string]any{"mfa_required": true})
+			return
+		}
 		if u.MFAEnabled && !verifyTOTP(decryptSecret(u.MFASecret), in.Code, time.Now()) {
 			ok, _ := auth.UseRecoveryCode(r.Context(), u.ID, hashText(strings.ToUpper(strings.TrimSpace(in.Code))))
 			if !ok {
@@ -96,7 +100,7 @@ func SecureHandler(revision string, store DeviceStore, auth AuthStore, webRoot s
 			return
 		}
 		setSessionCookie(w, raw)
-		writeJSON(w, 200, map[string]any{"user": u, "csrf_token": csrf})
+		writeJSON(w, 200, map[string]any{"user": u, "csrf_token": csrf, "mfa_setup_required": !u.MFAEnabled})
 	})
 	mux.HandleFunc("POST /api/auth/logout", func(w http.ResponseWriter, r *http.Request) {
 		if s, ok := authenticate(r, auth); ok {
@@ -154,6 +158,10 @@ func SecureHandler(revision string, store DeviceStore, auth AuthStore, webRoot s
 	})
 	protected.HandleFunc("POST /api/security/mfa/setup", func(w http.ResponseWriter, r *http.Request) {
 		a := r.Context().Value(authContextKey{}).(authContext)
+		if a.User.MFAEnabled {
+			writeError(w, http.StatusConflict, "MFA is already enabled")
+			return
+		}
 		secret := randomBase32(20)
 		_ = auth.UpdateMFA(r.Context(), a.User.ID, encryptSecret(secret), false)
 		writeJSON(w, 200, map[string]any{"secret": secret, "otpauth_uri": fmt.Sprintf("otpauth://totp/Hexa.Simulator:%s?secret=%s&issuer=Hexa.Simulator", a.User.Email, secret)})
@@ -177,17 +185,7 @@ func SecureHandler(revision string, store DeviceStore, auth AuthStore, webRoot s
 		writeJSON(w, 200, map[string]any{"recovery_codes": codes})
 	})
 	protected.HandleFunc("POST /api/security/mfa/disable", func(w http.ResponseWriter, r *http.Request) {
-		a := r.Context().Value(authContextKey{}).(authContext)
-		var in struct{ Password string }
-		_ = json.NewDecoder(r.Body).Decode(&in)
-		u, _ := auth.UserByID(r.Context(), a.User.ID)
-		if !verifyPassword(u.PasswordHash, in.Password) {
-			writeError(w, 401, "password required")
-			return
-		}
-		_ = auth.UpdateMFA(r.Context(), u.ID, "", false)
-		_ = auth.ReplaceRecoveryCodes(r.Context(), u.ID, nil)
-		w.WriteHeader(204)
+		writeError(w, http.StatusConflict, "MFA is required for simulator accounts")
 	})
 	protected.HandleFunc("POST /api/security/recovery-codes", func(w http.ResponseWriter, r *http.Request) {
 		a := r.Context().Value(authContextKey{}).(authContext)
@@ -267,6 +265,11 @@ func csrfMiddleware(protected *http.ServeMux, core http.Handler) http.Handler {
 				writeError(w, 403, "invalid CSRF token")
 				return
 			}
+		}
+		a := r.Context().Value(authContextKey{}).(authContext)
+		if !a.User.MFAEnabled && !strings.HasPrefix(r.URL.Path, "/api/auth/") && !strings.HasPrefix(r.URL.Path, "/api/security/mfa/") {
+			writeError(w, http.StatusForbidden, "MFA setup required")
+			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/auth/") || strings.HasPrefix(r.URL.Path, "/api/security/") || strings.HasPrefix(r.URL.Path, "/api/admin/") {
 			protected.ServeHTTP(w, r)
