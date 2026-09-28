@@ -8,6 +8,8 @@
   type Health = { revision: string; database_configured: boolean; database_ready: boolean };
   type Device = { id:number; name:string; imei:string; model:string; status:'online'|'offline'; latitude:number; longitude:number; speed:number; heading:number; ignition:boolean; updated_at:string };
   type RoutePoint = { latitude:number; longitude:number; speed:number; heading:number };
+  type DriveMode = 'auto'|'manual'|'target';
+  type DriveControl = { mode:DriveMode; speed:number; heading:number; target?:{latitude:number;longitude:number}; preset?:string; paused?:boolean };
   type AuthUser={id:number;email:string;display_name:string;role:string;mfa_enabled:boolean};
   type SessionInfo={id:string;user_agent:string;ip_address:string;last_seen_at:string;created_at:string;expires_at:string};
   let user=$state<AuthUser|null>(null), csrf=$state(''), authChecked=$state(false), loginEmail=$state('admin@simulator.local'), loginPassword=$state(''), loginCode=$state(''), authError=$state('');
@@ -56,9 +58,31 @@
   let liveMap:MapLibreMap|null=null, liveMarker:Marker|null=null, contextMarkers:Marker[]=[] , animationFrame=0;
   let renderedPosition:{lng:number;lat:number;heading:number}|null=null, trailByDevice=new Map<number,[number,number][]>();
   let timers=new Map<number,ReturnType<typeof setInterval>>(), routeSteps=new Map<number,number>();
+  let driveControls=new Map<number,DriveControl>();
+  let targetMarker:Marker|null=null, refreshing=$state(false);
 
   function routeFor(device:Device){ return routes[(device.id-1)%routes.length]; }
-  function nextPoint(device:Device){ const route=routeFor(device); const step=routeSteps.get(device.id)??0; routeSteps.set(device.id,(step+1)%route.length); return route[step%route.length]; }
+  function controlFor(device:Device){
+    const existing=driveControls.get(device.id);if(existing)return existing;
+    const created:DriveControl={mode:'auto',speed:Math.max(30,Math.round(device.speed)||40),heading:device.heading||0};driveControls.set(device.id,created);return created;
+  }
+  function setControl(device:Device,patch:Partial<DriveControl>){const next={...controlFor(device),...patch};driveControls.set(device.id,next);driveControls=new Map(driveControls);syncTargetMarker()}
+  function destinationPoint(latitude:number,longitude:number,heading:number,speed:number,seconds=3){
+    const distance=speed*1000/3600*seconds,rad=heading*Math.PI/180,latRad=latitude*Math.PI/180;
+    return {latitude:latitude+(distance*Math.cos(rad))/111320,longitude:longitude+(distance*Math.sin(rad))/(111320*Math.max(.2,Math.cos(latRad))),speed,heading:(heading+360)%360};
+  }
+  function distanceMeters(a:{latitude:number;longitude:number},b:{latitude:number;longitude:number}){const lat=(a.latitude+b.latitude)*Math.PI/360;const dx=(b.longitude-a.longitude)*111320*Math.cos(lat),dy=(b.latitude-a.latitude)*111320;return Math.hypot(dx,dy)}
+  function nextPoint(device:Device){
+    const control=controlFor(device);
+    if(control.mode==='auto'){const route=routeFor(device),step=routeSteps.get(device.id)??0;routeSteps.set(device.id,(step+1)%route.length);const point=route[step%route.length];return {...point,speed:control.speed}}
+    if(control.mode==='target'&&!control.target)return {latitude:device.latitude,longitude:device.longitude,speed:0,heading:control.heading};
+    if(control.mode==='target'&&control.target){
+      const target=control.target,heading=headingBetween([device.longitude,device.latitude],[target.longitude,target.latitude]),remaining=distanceMeters(device,target),stepMeters=control.speed*1000/3600*3;
+      if(remaining<=Math.max(3,stepMeters)){setControl(device,{heading,target:undefined,preset:undefined});return {latitude:target.latitude,longitude:target.longitude,speed:0,heading}}
+      return destinationPoint(device.latitude,device.longitude,heading,control.speed);
+    }
+    return destinationPoint(device.latitude,device.longitude,control.heading,control.speed);
+  }
   function syncSelected(){ if(selected) selected=devices.find(d=>d.id===selected?.id)??null; }
   function shortestHeading(from:number,to:number){return ((to-from+540)%360)-180}
   function markerElement(){const el=document.createElement('div');el.className='maplibre-device-marker';el.innerHTML='<span></span>';return el}
@@ -91,10 +115,12 @@
     map.addControl(new NavigationControl({showCompass:true}),'top-right');
     map.on('error',(event)=>{console.error('Live map error',event.error);message='Live map context failed to load'});
     map.on('load',()=>{installForestryContext(map);addContextMarkers(map);map.resize();map.fitBounds(FORESTRY_BOUNDS,{padding:36,duration:0});if(selected)animateMarker(selected)});
+    map.on('click',(event)=>{if(!selected)return;const control=controlFor(selected);if(control.mode!=='target')return;setControl(selected,{target:{latitude:event.lngLat.lat,longitude:event.lngLat.lng},heading:headingBetween([selected.longitude,selected.latitude],[event.lngLat.lng,event.lngLat.lat]),preset:undefined});message=`Target set for ${selected.name}`});
     liveMap=map;
   }
+  function syncTargetMarker(){if(targetMarker){targetMarker.remove();targetMarker=null}if(!liveMap||!selected)return;const target=controlFor(selected).target;if(!target)return;const el=document.createElement('div');el.className='target-point-marker';el.textContent='×';targetMarker=new Marker({element:el}).setLngLat([target.longitude,target.latitude]).addTo(liveMap)}
   function syncMapDevice(device:Device|null){
-    ensureMap();if(!liveMap||!device)return;
+    ensureMap();if(!liveMap||!device)return;syncTargetMarker();
     if(!liveMarker){liveMarker=new Marker({element:markerElement(),rotationAlignment:'map',pitchAlignment:'map'}).setLngLat([device.longitude,device.latitude]).addTo(liveMap)}
     animateMarker(device);
   }
@@ -104,13 +130,14 @@
   async function toggleMapFullscreen(){ if(!mapStage)return; if(document.fullscreenElement===mapStage) await document.exitFullscreen(); else await mapStage.requestFullscreen(); }
 
   async function refresh(){
+    if(refreshing)return;refreshing=true;
     try{
       const hr=await fetch('/healthz'); health=await hr.json();
       if(!health?.database_ready){message='Database is not ready';return}
       const r=await apiFetch('/api/devices'); if(!r.ok) throw new Error('Unable to load devices');
       const p=await r.json(); devices=p.items??[]; syncSelected(); if(!selected&&devices.length) selected=devices[0]; message='Simulator ready';
-      for(const device of devices) if(device.status==='online'&&!timers.has(device.id)) resume(device);
-    }catch(e){message=e instanceof Error?e.message:'Connection failed'}
+      for(const device of devices) if(device.status==='online'&&!timers.has(device.id)&&!controlFor(device).paused) resume(device);
+    }catch(e){message=e instanceof Error?e.message:'Connection failed'}finally{refreshing=false}
   }
   async function addDevice(){
     if(!name.trim()||!imei.trim()||saving)return; saving=true;
@@ -128,14 +155,24 @@
     const updated:Device=await r.json(); devices=devices.map(d=>d.id===updated.id?updated:d); syncSelected();
   }
   function resume(device:Device){
-    if(timers.has(device.id))return;
+    if(timers.has(device.id))return;setControl(device,{paused:false});
     const timer=setInterval(()=>{ const current=devices.find(d=>d.id===device.id); if(current) void sendTelemetry(current,'online').catch(()=>{message=`Telemetry failed for ${current.name}`}) },3000);
     timers.set(device.id,timer);
   }
   async function start(device:Device){
-    if(timers.has(device.id))return;
+    if(timers.has(device.id))return;setControl(device,{paused:false});
     try{ await sendTelemetry(device,'online'); const current=devices.find(d=>d.id===device.id); if(current)resume(current); message=`${device.name} is transmitting`; }
     catch(e){message=e instanceof Error?e.message:'Unable to start simulation'}
+  }
+  function pause(device:Device){const timer=timers.get(device.id);if(timer)clearInterval(timer);timers.delete(device.id);setControl(device,{paused:true});message=`${device.name} paused`; }
+  function setMode(device:Device,mode:DriveMode){setControl(device,{mode,target:mode==='target'?controlFor(device).target:undefined,preset:undefined,heading:device.heading});message=mode==='target'?'Click the map to choose a destination':`${device.name} switched to ${mode} drive`;}
+  function setSpeed(device:Device,value:number){setControl(device,{speed:Math.min(180,Math.max(0,Math.round(value))),preset:undefined})}
+  function turn(device:Device,delta:number){const c=controlFor(device);setControl(device,{mode:'manual',heading:(c.heading+delta+360)%360,target:undefined,preset:undefined})}
+  function applyPreset(device:Device,preset:'normal'|'overspeed'|'drift'|'exit'|'return'){
+    if(preset==='normal'||preset==='return'){setControl(device,{mode:'auto',speed:40,target:undefined,preset:undefined});message=`${device.name} returned to normal route`;return}
+    if(preset==='overspeed'){setControl(device,{mode:'auto',speed:90,target:undefined,preset:'overspeed'});message=`${device.name} overspeed scenario: 90 km/h`;return}
+    if(preset==='drift'){setControl(device,{mode:'manual',speed:55,heading:(device.heading+55)%360,target:undefined,preset:'drift'});message=`${device.name} drift / route deviation active`;return}
+    const target={latitude:-3.032,longitude:104.892};setControl(device,{mode:'target',speed:65,heading:headingBetween([device.longitude,device.latitude],[target.longitude,target.latitude]),target,preset:'exit'});message=`${device.name} is heading outside the operating estate`;
   }
   async function stop(device:Device){
     const timer=timers.get(device.id); if(timer)clearInterval(timer); timers.delete(device.id);
@@ -149,7 +186,7 @@
     if(device.status==='online') await stop(device);
     if(!confirm(`Delete ${device.name}? This removes the virtual device from the simulator.`))return;
     const r=await apiFetch(`/api/devices/${device.id}`,{method:'DELETE'}); if(!r.ok){message='Unable to delete device';return}
-    timers.delete(device.id);routeSteps.delete(device.id);selected=null;await refresh();message=`${device.name} deleted`;
+    timers.delete(device.id);routeSteps.delete(device.id);driveControls.delete(device.id);selected=null;syncTargetMarker();await refresh();message=`${device.name} deleted`;
   }
   $effect(()=>{if(mapContainer){ensureMap();syncMapDevice(selected)}});
   $effect(()=>{if(selected)syncMapDevice(selected)});
@@ -186,7 +223,7 @@
     {#if view==='devices'}<main class="live-main">
       <header class="live-page-head sensor-style-head">
         <div class="live-heading"><span class="live-heading-brand">Hexa.Simulator</span><h1>Live Map</h1><p class="subtitle">{language==='id'?'Pantau perangkat GPS virtual dan telemetri secara langsung.':'Monitor virtual GPS devices and telemetry in real time.'}</p></div>
-        <div class="live-head-actions"><div class="live-pill"><i></i><strong>Live</strong><span>{liveCopy()}</span></div><div class="live-clock"><strong>{clockTime()}</strong><span>{clockDate()}</span></div><button class="primary" onclick={()=>showAdd=true}>＋ {language==='id'?'Tambah perangkat':'Add device'}</button></div>
+        <div class="live-head-actions"><button class="refresh-button" disabled={refreshing} title="Refresh devices and telemetry" onclick={()=>void refresh()}>↻ {refreshing?'Refreshing…':'Refresh'}</button><div class="live-pill"><i></i><strong>Live</strong><span>{liveCopy()}</span></div><div class="live-clock"><strong>{clockTime()}</strong><span>{clockDate()}</span></div><button class="primary" onclick={()=>showAdd=true}>＋ {language==='id'?'Tambah perangkat':'Add device'}</button></div>
       </header>
 
       <section class="live-workbench" aria-label="Live simulator map">
@@ -219,8 +256,16 @@
               <div><span>Heading</span><strong>{Math.round(selected.heading)}°</strong></div>
               <div><span>Ignition</span><strong class:green={selected.ignition}>{selected.ignition?'On':'Off'}</strong></div>
               <div><span>Position</span><strong class="mono">{selected.latitude.toFixed(5)}, {selected.longitude.toFixed(5)}</strong></div>
+              <div class="simulation-control">
+                <div class="control-title"><strong>Simulation Control</strong><span>{controlFor(selected).preset||controlFor(selected).mode}</span></div>
+                <div class="mode-tabs"><button class:active={controlFor(selected).mode==='auto'} onclick={()=>setMode(selected!,'auto')}>Auto Route</button><button class:active={controlFor(selected).mode==='manual'} onclick={()=>setMode(selected!,'manual')}>Manual</button><button class:active={controlFor(selected).mode==='target'} onclick={()=>setMode(selected!,'target')}>Target Point</button></div>
+                <label class="speed-control"><span>Speed <b>{controlFor(selected).speed} km/h</b></span><input type="range" min="0" max="120" step="5" value={controlFor(selected).speed} oninput={(e)=>setSpeed(selected!,Number(e.currentTarget.value))}/></label>
+                {#if controlFor(selected).mode==='manual'}<div class="direction-pad"><button onclick={()=>turn(selected!,-45)}>↖</button><button onclick={()=>turn(selected!,0)}>↑</button><button onclick={()=>turn(selected!,45)}>↗</button><button onclick={()=>turn(selected!,-90)}>←</button><strong>{Math.round(controlFor(selected).heading)}°</strong><button onclick={()=>turn(selected!,90)}>→</button><button onclick={()=>turn(selected!,-135)}>↙</button><button onclick={()=>turn(selected!,180)}>↓</button><button onclick={()=>turn(selected!,135)}>↘</button></div>{/if}
+                {#if controlFor(selected).mode==='target'}<div class="target-hint">⌖ {controlFor(selected).target?'Destination selected — click map to change it':'Click anywhere on the map to set destination'}</div>{/if}
+                <div class="scenario-grid"><button onclick={()=>applyPreset(selected!,'normal')}>Normal 40</button><button class="warn" onclick={()=>applyPreset(selected!,'overspeed')}>Overspeed 90</button><button onclick={()=>applyPreset(selected!,'drift')}>Drift</button><button onclick={()=>applyPreset(selected!,'exit')}>Exit Zone</button><button onclick={()=>applyPreset(selected!,'return')}>Return Route</button></div>
+              </div>
               <div class="device-actions">
-                {#if selected.status==='online'}<button class="stop" onclick={()=>void stop(selected!)}>■ Stop</button>{:else}<button class="start" onclick={()=>void start(selected!)}>▶ Start</button>{/if}
+                {#if selected.status==='online'}<button class="start" disabled={!controlFor(selected).paused} onclick={()=>void start(selected!)}>▶ Resume</button><button class="pause" disabled={controlFor(selected).paused} onclick={()=>pause(selected!)}>Ⅱ Pause</button><button class="stop" onclick={()=>void stop(selected!)}>■ Stop</button>{:else}<button class="start" onclick={()=>void start(selected!)}>▶ Start</button>{/if}
                 <button class="sensor-export" title="Download Hexa.Sensor import CSVs" onclick={()=>downloadSensorOnboarding(selected!)}>⇩ Sensor CSV</button>
                 <button class="danger compact-danger" onclick={()=>void remove(selected!)}>Delete</button>
               </div>
