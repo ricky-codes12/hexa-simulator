@@ -29,6 +29,8 @@
   let health=$state<Health|null>(null), devices=$state<Device[]>([]), selected=$state<Device|null>(null);
   let showAdd=$state(false), saving=$state(false), message=$state('Connecting…');
   let name=$state(''), imei=$state(''), model=$state('Teltonika FMC920');
+  let search=$state(''), mapZoom=$state(1), showMapLayer=$state(true);
+  let mapStage:HTMLDivElement|null=$state(null);
   let timers=new Map<number,ReturnType<typeof setInterval>>(), routeSteps=new Map<number,number>();
 
   function routeFor(device:Device){ return routes[(device.id-1)%routes.length]; }
@@ -44,6 +46,9 @@
     const marker=project(device.latitude,device.longitude); return {routePoints,marker,width,height};
   }
   function updatedLabel(value:string){ const date=new Date(value); return Number.isNaN(date.getTime())?'Waiting for telemetry':date.toLocaleString(); }
+  function visibleDevices(){ const q=search.trim().toLowerCase(); return q?devices.filter(d=>[d.name,d.imei,d.model].some(v=>v.toLowerCase().includes(q))):devices; }
+  function zoomMap(delta:number){ mapZoom=Math.min(1.8,Math.max(1,mapZoom+delta)); }
+  async function toggleMapFullscreen(){ if(!mapStage)return; if(document.fullscreenElement===mapStage) await document.exitFullscreen(); else await mapStage.requestFullscreen(); }
 
   async function refresh(){
     try{
@@ -95,7 +100,7 @@
 <div class="shell">
   <aside>
     <div class="brand">
-      <div class="mark"><span>H</span></div>
+      <div class="mark" aria-label="Hexa.Simulator logo"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M8 2h16l7 14-7 14H8L1 16 8 2Z"/><path d="M9 10h4v4h6v-4h4v12h-4v-4h-6v4H9V10Z"/></svg></div>
       <div><strong>Hexa.Simulator</strong><span>hexa-simulator</span></div>
     </div>
     <div class="nav-section">Simulator</div>
@@ -122,11 +127,11 @@
       <section class="live-workbench" aria-label="Live simulator map">
         <aside class="live-sidebar">
           <div class="live-sidebar-head">
-            <div class="live-title-row"><h2>Live Map</h2><div class="panel-tools"><button aria-label="Edit view">⌁</button><button aria-label="Wallboard">▣</button></div></div>
+            <div class="live-title-row"><h2>Live Map</h2><div class="panel-tools"><button aria-label="Fullscreen map" title="Fullscreen map" onclick={()=>void toggleMapFullscreen()}>▣</button></div></div>
             <div class="live-now"><i></i><strong>Live</strong><span>{devices.some(d=>d.status==='online')?'just now':'waiting'}</span></div>
           </div>
           <div class="live-sidebar-body">
-            <div class="search-box">⌕ <span>Name, device ID or model</span></div>
+            <label class="search-box"><span aria-hidden="true">⌕</span><input bind:value={search} aria-label="Search devices" placeholder="Name, device ID or model" /></label>
             <div class="filter-chips">
               <span class="chip moving">▲ Moving <b>{devices.filter(d=>d.status==='online'&&d.speed>0).length}</b></span>
               <span class="chip idle">● Idle <b>{devices.filter(d=>d.status==='online'&&d.speed===0).length}</b></span>
@@ -135,7 +140,7 @@
             </div>
             <div class="device-section-label">Devices</div>
             <div class="live-device-list">
-              {#each devices as device (device.id)}
+              {#each visibleDevices() as device (device.id)}
                 <button class:selected-device={selected?.id===device.id} class="live-device-row" onclick={()=>selected=device}>
                   <span class:active-arrow={device.status==='online'} class="device-arrow">▲</span>
                   <span class="device-row-copy"><strong>{device.name}</strong><small>{device.model}</small><small class="mono">{device.imei}</small></span>
@@ -157,19 +162,21 @@
           {/if}
         </aside>
 
-        <div class="sensor-map-stage">
+        <div class="sensor-map-stage" bind:this={mapStage}>
           {#if selected}
             {@const map=mapGeometry(selected)}
-            <svg class="sensor-map" viewBox={`0 0 ${map.width} ${map.height}`} preserveAspectRatio="xMidYMid slice" role="img" aria-label={`Live map position for ${selected.name}`}>
+            <svg class="sensor-map" class:map-zoomed={mapZoom>1} style={`--map-zoom:${mapZoom}`} viewBox={`0 0 ${map.width} ${map.height}`} preserveAspectRatio="xMidYMid meet" role="img" aria-label={`Live map position for ${selected.name}`}>
               <defs>
                 <pattern id="sensorGrid" width="42" height="42" patternUnits="userSpaceOnUse"><path d="M42 0H0V42" fill="none" /></pattern>
                 <linearGradient id="mapGlow" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0b1718"/><stop offset="1" stop-color="#081016"/></linearGradient>
               </defs>
               <rect width="100%" height="100%" fill="url(#mapGlow)"/>
-              <path d="M0 82 L115 70 L205 83 L310 65 L420 80 L535 74 L640 91" class="map-road major"/>
-              <path d="M36 248 L90 210 L150 220 L204 190 L250 198 L308 156 L370 165 L430 140 L500 160 L590 135" class="map-road"/>
-              <path d="M70 108 H570 V260 H70 Z" class="operating-area"/>
-              <rect x="70" y="108" width="500" height="152" fill="url(#sensorGrid)" class="sensor-grid"/>
+              {#if showMapLayer}
+                <path d="M0 82 L115 70 L205 83 L310 65 L420 80 L535 74 L640 91" class="map-road major"/>
+                <path d="M36 248 L90 210 L150 220 L204 190 L250 198 L308 156 L370 165 L430 140 L500 160 L590 135" class="map-road"/>
+                <path d="M70 108 H570 V260 H70 Z" class="operating-area"/>
+                <rect x="70" y="108" width="500" height="152" fill="url(#sensorGrid)" class="sensor-grid"/>
+              {/if}
               <polyline points={map.routePoints} class="trail-shadow"/><polyline points={map.routePoints} class="sensor-trail"/>
               <circle cx={map.marker.x} cy={map.marker.y} r="15" class:marker-online={selected.status==='online'} class="marker-pulse"/>
               <g transform={`translate(${map.marker.x} ${map.marker.y}) rotate(${selected.heading})`} class="sensor-vehicle"><path d="M0 -11 L8 9 L0 5 L-8 9 Z"/></g>
@@ -180,7 +187,7 @@
           {:else}
             <div class="map-empty"><span>⌁</span><strong>No device selected</strong><small>Add or select a virtual device to view its live position.</small></div>
           {/if}
-          <div class="map-controls"><button aria-label="Zoom in">＋</button><button aria-label="Zoom out">−</button><button aria-label="Fullscreen">⌗</button><button aria-label="Layers">▱</button></div>
+          <div class="map-controls"><button aria-label="Zoom in" title="Zoom in" onclick={()=>zoomMap(.2)} disabled={mapZoom>=1.8}>＋</button><button aria-label="Zoom out" title="Zoom out" onclick={()=>zoomMap(-.2)} disabled={mapZoom<=1}>−</button><button aria-label="Fullscreen map" title="Fullscreen map" onclick={()=>void toggleMapFullscreen()}>⌗</button><button class:control-active={showMapLayer} aria-label="Toggle map context layer" title="Toggle map context layer" onclick={()=>showMapLayer=!showMapLayer}>▱</button></div>
           <div class="map-legend"><span><i class="legend-operating"></i> Demo area</span><span><i class="legend-trail"></i> Trail</span><span><i class="legend-device"></i> Device</span><em>Virtual demo geography</em></div>
           <div class="map-runtime"><i class:ok={health?.database_ready}></i>{health?.database_ready?'Runtime ready':'Runtime unavailable'}<span>·</span><span>~3s telemetry</span></div>
         </div>
