@@ -58,7 +58,7 @@
   let liveMap:MapLibreMap|null=null, liveMarker:Marker|null=null, contextMarkers:Marker[]=[] , animationFrame=0;
   let renderedPosition:{lng:number;lat:number;heading:number}|null=null, trailByDevice=new Map<number,[number,number][]>();
   let timers=new Map<number,ReturnType<typeof setInterval>>(), routeSteps=new Map<number,number>();
-  let driveControls=new Map<number,DriveControl>();
+  let driveControls=$state(new Map<number,DriveControl>());
   let targetMarker:Marker|null=null, refreshing=$state(false);
 
   function routeFor(device:Device){ return routes[(device.id-1)%routes.length]; }
