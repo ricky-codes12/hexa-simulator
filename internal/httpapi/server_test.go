@@ -188,3 +188,13 @@ func TestSensorOnboardingZIPMissingDevice(t *testing.T) {
 		t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
 	}
 }
+
+func TestTOTPVerificationRFCVector(t *testing.T) {
+	const secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+	if !verifyTOTP(secret, "287082", time.Unix(59, 0)) {
+		t.Fatal("expected RFC 6238-derived six-digit TOTP to verify")
+	}
+	if verifyTOTP(secret, "000000", time.Unix(59, 0)) {
+		t.Fatal("unexpected TOTP verification")
+	}
+}

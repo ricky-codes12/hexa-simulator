@@ -47,3 +47,9 @@ For each persisted **online** telemetry update, hexa-simulator can POST one `hex
 `SIM_SENSOR_PUSH_URL` and `SIM_SENSOR_PUSH_KEY` must be configured together in protected environment configuration. The key is sent only as `Authorization: Bearer <key>` and is never committed. `SIM_SENSOR_PUSH_TIMEOUT` defaults to five seconds. Non-2xx responses, network errors and timeouts are surfaced through the telemetry API as forwarding failures so a broken demo integration is visible.
 
 When HTTP Push configuration is absent, standalone simulator behavior is unchanged. Optional Teltonika TCP output through `TELTONIKA_GATEWAY_ADDR` remains an independent protocol-testing feature and may be enabled alongside HTTP Push.
+
+## Simulator authentication and MFA enrollment
+
+Simulator access uses server-side sessions and requires TOTP enrollment before an authenticated account can use simulator or administration APIs. Password verification is the first sign-in step. Accounts with MFA already enabled receive an explicit MFA challenge before a session is created. Accounts without MFA receive a restricted session that may access only authentication and MFA-enrollment endpoints until a TOTP secret is verified.
+
+The enrollment UI renders the backend-issued `otpauth://` URI as a local QR code in the browser and also exposes the setup key as a fallback. The QR image is generated client-side; the TOTP secret is not sent to any third-party QR service. After successful verification, recovery codes are shown once and normal simulator access is enabled. Subsequent sign-ins require the authenticator or a recovery code.
