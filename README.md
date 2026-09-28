@@ -9,6 +9,8 @@ Hexa Simulator is a Hexa.Build-native Svelte + Go + PostgreSQL application for d
 - Start/stop a simulation from the device list or live detail panel.
 - Drive each virtual device in auto-route, manual-heading, or click-to-target mode with live speed control, pause/resume, and demo presets for overspeed, drift/route deviation, exit-zone, and return-to-route behavior.
 - Refresh device/telemetry state from the Live Map without reloading the browser or interrupting an active simulation.
+- Select devices through a paginated, server-side searchable Device Explorer (50 results per page) so the control workspace does not render an unbounded device list.
+- The workspace clock follows the accessing browser timezone, using WIB/WITA/WIT labels for Indonesia and a localized full date including the year.
 - Inspect a dependency-free live route map with a moving, heading-aware vehicle marker plus speed, ignition, coordinates, and last-telemetry time.
 - Online devices emit deterministic Jakarta route telemetry every three seconds (position, speed, heading, ignition) through the Go API and persist the latest state in PostgreSQL.
 - A page reload resumes the browser simulation clock for devices persisted as online.
