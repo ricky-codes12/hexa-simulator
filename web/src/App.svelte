@@ -8,6 +8,7 @@
   let user=$state<AuthUser|null>(null), csrf=$state(''), authChecked=$state(false), loginEmail=$state('admin@simulator.local'), loginPassword=$state(''), loginCode=$state(''), authError=$state('');
   let authStep=$state<'password'|'mfa'|'setup'|'recovery'>('password'), mfaQR=$state(''), setupError=$state('');
   let view=$state<'devices'|'security'|'users'>('devices'), profileOpen=$state(false), sessions=$state<SessionInfo[]>([]), users=$state<AuthUser[]>([]);
+  let theme=$state<'system'|'light'|'dark'>('system'), language=$state<'id'|'en'>('en'), now=$state(new Date());
   let newUserEmail=$state(''),newUserName=$state(''),newUserRole=$state('operator'),newUserPassword=$state('');
   let currentPassword=$state(''),newPassword=$state(''),repeatPassword=$state(''),mfaSetup=$state<{secret:string;otpauth_uri:string}|null>(null),mfaCode=$state(''),recovery=$state<string[]>([]);
   async function apiFetch(url:string,init:RequestInit={}){const headers=new Headers(init.headers);if(csrf&&init.method&& !['GET','HEAD'].includes(init.method))headers.set('X-CSRF-Token',csrf);return fetch(url,{...init,headers})}
@@ -24,6 +25,12 @@
   async function disableMFA(){const password=prompt('Enter your current password to turn off MFA');if(!password)return;const r=await apiFetch('/api/security/mfa/disable',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({password})});if(r.ok&&user)user={...user,mfa_enabled:false}}
   async function revokeSession(id:string){const r=await apiFetch(`/api/security/sessions/${id}`,{method:'DELETE'});if(r.ok)await openSecurity()}
   async function regenerateRecovery(){const r=await apiFetch('/api/security/recovery-codes',{method:'POST'});if(r.ok)recovery=(await r.json()).recovery_codes||[]}
+  function setTheme(next:'system'|'light'|'dark'){theme=next;localStorage.setItem('sim-theme',next);document.documentElement.dataset.theme=next}
+  function toggleLanguage(){language=language==='en'?'id':'en';localStorage.setItem('sim-language',language)}
+  function clockTime(){return now.toLocaleTimeString(language==='id'?'id-ID':'en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})}
+  function clockDate(){return now.toLocaleDateString(language==='id'?'id-ID':'en-US',{weekday:'long',day:'2-digit',month:'long'})}
+  function liveCopy(){return devices.some(d=>d.status==='online')?(language==='id'?'baru saja':'just now'):(language==='id'?'menunggu':'waiting')}
+  $effect(()=>{const saved=localStorage.getItem('sim-theme');if(saved==='system'||saved==='light'||saved==='dark')theme=saved;document.documentElement.dataset.theme=theme;const savedLanguage=localStorage.getItem('sim-language');if(savedLanguage==='id'||savedLanguage==='en')language=savedLanguage;const clock=setInterval(()=>now=new Date(),1000);return()=>clearInterval(clock)});
 
 
   const routes:RoutePoint[][] = [
@@ -132,30 +139,36 @@
     </div>
     <div class="nav-section">Simulator</div>
     <nav><button class:nav-active={view==='devices'} onclick={()=>view='devices'}><span class="nav-icon">⌁</span> Devices</button></nav><div class="nav-section admin-section">Administration</div><nav><button class:nav-active={view==='users'} onclick={()=>void openUsers()}><span class="nav-icon">♙</span> Users and roles</button><button onclick={()=>document.body.classList.toggle('sidebar-collapsed')}><span class="nav-icon">◧</span> Collapse</button></nav>
-    <div class="aside-foot"><span class:ok={health?.database_ready}></span>{health?.database_ready?'Runtime connected':'Runtime unavailable'}</div>
+    <div class="sidebar-utility">
+      <div class="utility-label">Theme</div>
+      <div class="theme-switch" aria-label="Theme"><button class:active={theme==='system'} onclick={()=>setTheme('system')}>System</button><button class:active={theme==='light'} onclick={()=>setTheme('light')}>Light</button><button class:active={theme==='dark'} onclick={()=>setTheme('dark')}>Dark</button></div>
+      <div class="connection-state"><span class:ok={health?.database_ready}></span>{health?.database_ready?'Connected · Live':'Runtime unavailable'}</div>
+      <div class="sidebar-divider"></div>
+      <small>© 2026 Hexacode. All rights reserved.</small>
+    </div>
   </aside>
 
   <div class="workspace">
     <div class="topbar">
-      <div class="topbar-state"><span class:ok={health?.database_ready}></span>{health?.database_ready?'Simulator ready':'Checking runtime'}</div>
-      <button class="admin-profile profile-button" onclick={()=>profileOpen=!profileOpen}>
-        <div class="avatar">SA</div>
-        <div class="admin-copy"><strong>Simulator Administrator</strong><span>Administrator</span></div>
+      <div class="topbar-title"><strong>Hexa.Simulator</strong><span>Virtual GPS Device & Telemetry Simulator</span></div>
+      <div class="topbar-actions"><button class="language-flag" title={language==='en'?'Switch to Bahasa Indonesia':'Switch to English'} aria-label="Change language" onclick={toggleLanguage}>{language==='en'?'🇬🇧':'🇮🇩'}</button><button class="admin-profile profile-button" onclick={()=>profileOpen=!profileOpen}>
+        <div class="avatar">DA</div>
+        <div class="admin-copy"><strong>{user.display_name||'Dev Administrator'}</strong><span>{user.email}</span></div>
         <span class="chevron">⌄</span>
-      </button>{#if profileOpen}<div class="profile-menu"><button onclick={()=>void openSecurity()}>Security</button><button onclick={()=>void logout()}>Sign out</button></div>{/if}
+      </button></div>{#if profileOpen}<div class="profile-menu"><button onclick={()=>void openSecurity()}>Security</button><button onclick={()=>void logout()}>Sign out</button></div>{/if}
     </div>
 
     {#if view==='devices'}<main class="live-main">
-      <header class="live-page-head">
-        <div><h1>Live Map</h1><p class="subtitle">Live virtual GPS telemetry for Hexa.Sensor integration testing.</p></div>
-        <button class="primary" onclick={()=>showAdd=true}>＋ Add device</button>
+      <header class="live-page-head sensor-style-head">
+        <div class="live-heading"><span class="live-heading-brand">Hexa.Simulator</span><h1>Live Map</h1><p class="subtitle">{language==='id'?'Pantau perangkat GPS virtual dan telemetri secara langsung.':'Monitor virtual GPS devices and telemetry in real time.'}</p></div>
+        <div class="live-head-actions"><div class="live-pill"><i></i><strong>Live</strong><span>{liveCopy()}</span></div><div class="live-clock"><strong>{clockTime()}</strong><span>{clockDate()}</span></div><button class="primary" onclick={()=>showAdd=true}>＋ {language==='id'?'Tambah perangkat':'Add device'}</button></div>
       </header>
 
       <section class="live-workbench" aria-label="Live simulator map">
         <aside class="live-sidebar">
           <div class="live-sidebar-head">
             <div class="live-title-row"><h2>Live Map</h2><div class="panel-tools"><button aria-label="Fullscreen map" title="Fullscreen map" onclick={()=>void toggleMapFullscreen()}>▣</button></div></div>
-            <div class="live-now"><i></i><strong>Live</strong><span>{devices.some(d=>d.status==='online')?'just now':'waiting'}</span></div>
+            <div class="live-now"><i></i><strong>Live</strong><span>{liveCopy()}</span></div>
           </div>
           <div class="live-sidebar-body">
             <label class="search-box"><span aria-hidden="true">⌕</span><input bind:value={search} aria-label="Search devices" placeholder="Name, device ID or model" /></label>
