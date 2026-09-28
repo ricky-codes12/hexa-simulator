@@ -88,6 +88,10 @@
     const timer=timers.get(device.id); if(timer)clearInterval(timer); timers.delete(device.id);
     try{await sendTelemetry(device,'offline');message=`${device.name} stopped`;}catch(e){message=e instanceof Error?e.message:'Unable to stop simulation'}
   }
+  function downloadSensorOnboarding(device:Device){
+    window.location.href=`/api/devices/${device.id}/sensor-onboarding.zip`;
+    message=`Hexa.Sensor onboarding CSV package downloaded for ${device.name}`;
+  }
   async function remove(device:Device){
     if(device.status==='online') await stop(device);
     if(!confirm(`Delete ${device.name}? This removes the virtual device from the simulator.`))return;
@@ -156,6 +160,7 @@
               <div><span>Position</span><strong class="mono">{selected.latitude.toFixed(5)}, {selected.longitude.toFixed(5)}</strong></div>
               <div class="device-actions">
                 {#if selected.status==='online'}<button class="stop" onclick={()=>void stop(selected!)}>■ Stop</button>{:else}<button class="start" onclick={()=>void start(selected!)}>▶ Start</button>{/if}
+                <button class="sensor-export" title="Download Hexa.Sensor import CSVs" onclick={()=>downloadSensorOnboarding(selected!)}>⇩ Sensor CSV</button>
                 <button class="danger compact-danger" onclick={()=>void remove(selected!)}>Delete</button>
               </div>
             </div>

@@ -1,12 +1,17 @@
 package httpapi
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -108,6 +113,44 @@ func Handler(revision string, store DeviceStore, webRoot string, forwarders ...T
 			return
 		}
 		writeJSON(writer, http.StatusCreated, item)
+	})
+	mux.HandleFunc("GET /api/devices/{id}/sensor-onboarding.zip", func(writer http.ResponseWriter, request *http.Request) {
+		if store == nil {
+			writeError(writer, http.StatusServiceUnavailable, "PostgreSQL is not configured; set DATABASE_URL")
+			return
+		}
+		var id int64
+		if _, err := fmtSscan(request.PathValue("id"), &id); err != nil || id < 1 {
+			writeError(writer, http.StatusBadRequest, "invalid device id")
+			return
+		}
+		items, err := store.ListDevices(request.Context())
+		if err != nil {
+			writeError(writer, http.StatusInternalServerError, "load devices")
+			return
+		}
+		var device *Device
+		for i := range items {
+			if items[i].ID == id {
+				device = &items[i]
+				break
+			}
+		}
+		if device == nil {
+			writeError(writer, http.StatusNotFound, "device not found")
+			return
+		}
+		payload, err := sensorOnboardingZIP(*device)
+		if err != nil {
+			writeError(writer, http.StatusInternalServerError, "build Sensor onboarding package")
+			return
+		}
+		filename := fmt.Sprintf("hexa-sensor-onboarding-%s.zip", safeKey(device.Name))
+		writer.Header().Set("Content-Type", "application/zip")
+		writer.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+		writer.Header().Set("Cache-Control", "no-store")
+		writer.WriteHeader(http.StatusOK)
+		_, _ = writer.Write(payload)
 	})
 	mux.HandleFunc("POST /api/devices/{id}/telemetry", func(writer http.ResponseWriter, request *http.Request) {
 		if store == nil {
@@ -225,4 +268,80 @@ func writeJSON(writer http.ResponseWriter, status int, value any) {
 }
 func writeError(writer http.ResponseWriter, status int, message string) {
 	writeJSON(writer, status, map[string]string{"error": message})
+}
+
+var nonKeyChars = regexp.MustCompile(`[^a-z0-9]+`)
+
+func safeKey(value string) string {
+	key := nonKeyChars.ReplaceAllString(strings.ToLower(strings.TrimSpace(value)), "-")
+	key = strings.Trim(key, "-")
+	if key == "" {
+		return "device"
+	}
+	return key
+}
+
+func sensorProfileKey(model string) string {
+	key := safeKey(model)
+	if key == "teltonika-fmc920" {
+		return "teltonika-fmc920-test"
+	}
+	return key
+}
+
+func sensorAssetCode(device Device) string {
+	code := strings.ToUpper(safeKey(device.Name))
+	if code == "DEVICE" {
+		return fmt.Sprintf("SIM-%d", device.ID)
+	}
+	return code
+}
+
+func csvBytes(header, row []string) ([]byte, error) {
+	var buffer bytes.Buffer
+	writer := csv.NewWriter(&buffer)
+	if err := writer.Write(header); err != nil {
+		return nil, err
+	}
+	if err := writer.Write(row); err != nil {
+		return nil, err
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		return nil, err
+	}
+	return buffer.Bytes(), nil
+}
+
+func sensorOnboardingZIP(device Device) ([]byte, error) {
+	assetCode := sensorAssetCode(device)
+	files := []struct {
+		name   string
+		header []string
+		row    []string
+	}{
+		{"01_estates.csv", []string{"code", "name", "parent_code"}, []string{"DEMO-ESTATE", "Demo Estate", ""}},
+		{"02_devices.csv", []string{"hardware_id", "profile_key", "serial", "firmware", "sim_iccid", "sim_msisdn", "sim_operator", "external_ids", "labels"}, []string{device.IMEI, sensorProfileKey(device.Model), "", "", "", "", "", "", ""}},
+		{"03_assets.csv", []string{"asset_code", "asset_type", "name", "plate_number", "estate_code", "labels"}, []string{assetCode, "Truck", device.Name, "", "DEMO-ESTATE", ""}},
+		{"04_assignments.csv", []string{"hardware_id", "asset_code", "valid_from", "valid_to"}, []string{device.IMEI, assetCode, time.Now().UTC().Format(time.RFC3339), ""}},
+	}
+	var buffer bytes.Buffer
+	archive := zip.NewWriter(&buffer)
+	for _, file := range files {
+		data, err := csvBytes(file.header, file.row)
+		if err != nil {
+			return nil, err
+		}
+		entry, err := archive.Create(file.name)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := entry.Write(data); err != nil {
+			return nil, err
+		}
+	}
+	if err := archive.Close(); err != nil {
+		return nil, err
+	}
+	return buffer.Bytes(), nil
 }
