@@ -44,6 +44,7 @@ func serve() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	var store apphttp.DeviceStore
+	var authStore apphttp.AuthStore
 	if databaseURL := os.Getenv("DATABASE_URL"); databaseURL != "" {
 		postgres, err := postgresstore.Open(ctx, databaseURL)
 		if err != nil {
@@ -52,6 +53,16 @@ func serve() {
 		}
 		defer postgres.Close()
 		store = postgres
+		authStore = postgres
+		adminPassword := os.Getenv("SIM_ADMIN_PASSWORD")
+		if len(adminPassword) < 12 {
+			fmt.Fprintln(os.Stderr, "SIM_ADMIN_PASSWORD must be set to at least 12 characters")
+			os.Exit(1)
+		}
+		if err := apphttp.EnsureBootstrapAdmin(ctx, authStore, os.Getenv("SIM_ADMIN_EMAIL"), adminPassword); err != nil {
+			fmt.Fprintf(os.Stderr, "bootstrap admin: %v\n", err)
+			os.Exit(1)
+		}
 	}
 	gatewayAddress := os.Getenv("TELTONIKA_GATEWAY_ADDR")
 	pushURL := os.Getenv("SIM_SENSOR_PUSH_URL")
@@ -69,7 +80,7 @@ func serve() {
 	}
 	server := &http.Server{
 		Addr:              address,
-		Handler:           apphttp.Handler(revision, store, os.Getenv("WEB_ROOT"), forwarders...),
+		Handler:           apphttp.SecureHandler(revision, store, authStore, os.Getenv("WEB_ROOT"), forwarders...),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {
