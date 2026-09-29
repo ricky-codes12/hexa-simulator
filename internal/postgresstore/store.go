@@ -16,6 +16,11 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open PostgreSQL: %w", err)
 	}
+	// The simulator runs hundreds of device loops concurrently. Keep their
+	// database work inside a bounded pool so one instance cannot exhaust the
+	// PostgreSQL server and lock authentication or health checks out.
+	db.SetMaxOpenConns(20)
+	db.SetMaxIdleConns(10)
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("ping PostgreSQL: %w", err)
