@@ -53,6 +53,12 @@ func serve() {
 			os.Exit(1)
 		}
 		defer postgres.Close()
+		if total, err := postgres.EnsureDemoFleet(ctx, 350); err != nil {
+			fmt.Fprintf(os.Stderr, "demo fleet: %v\n", err)
+			os.Exit(1)
+		} else {
+			fmt.Printf("demo fleet: %d devices ready\n", total)
+		}
 		store = postgres
 		authStore = postgres
 		adminPassword := os.Getenv("SIM_ADMIN_PASSWORD")

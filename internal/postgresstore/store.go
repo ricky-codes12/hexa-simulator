@@ -23,6 +23,72 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 func (s *Store) Close() error { return s.db.Close() }
+
+// EnsureDemoFleet fills the database up to target devices without deleting or
+// rewriting operator-created rows. Seed candidates are deterministic and
+// conflict-safe by IMEI, so repeated startup calls are idempotent.
+func (s *Store) EnsureDemoFleet(ctx context.Context, target int) (int, error) {
+	if target <= 0 {
+		return 0, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	// Serialize fleet provisioning across overlapping runtime starts.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(35630704)`); err != nil {
+		return 0, err
+	}
+	var current int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM devices`).Scan(&current); err != nil {
+		return 0, err
+	}
+	if current >= target {
+		if err := tx.Commit(); err != nil {
+			return 0, err
+		}
+		return current, nil
+	}
+	needed := target - current
+	result, err := tx.ExecContext(ctx, `
+WITH candidates AS (
+  SELECT
+    n,
+    '35630704' || lpad((2441000 + n)::text, 7, '0') AS imei
+  FROM generate_series(1, 1400) AS n
+), available AS (
+  SELECT n, imei
+  FROM candidates c
+  WHERE NOT EXISTS (SELECT 1 FROM devices d WHERE d.imei = c.imei)
+  ORDER BY n
+  LIMIT $1
+)
+INSERT INTO devices(name, imei, model, latitude, longitude, heading)
+SELECT
+  'Truck ' || lpad(n::text, 3, '0'),
+  imei,
+  'Teltonika FMC920',
+  -3.020 + ((n - 1) % 14) * 0.0055,
+  104.715 + ((n - 1) % 25) * 0.0068,
+  ((n * 47) % 360)::double precision
+FROM available
+ON CONFLICT (imei) DO NOTHING`, needed)
+	if err != nil {
+		return 0, err
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if int(inserted) != needed {
+		return 0, fmt.Errorf("demo fleet provisioning inserted %d of %d required devices", inserted, needed)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return current + int(inserted), nil
+}
 func (s *Store) Ping(ctx context.Context) error {
 	var ready bool
 	if err := s.db.QueryRowContext(ctx, "SELECT to_regclass('public.devices') IS NOT NULL").Scan(&ready); err != nil {

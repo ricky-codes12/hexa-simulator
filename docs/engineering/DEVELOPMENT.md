@@ -20,6 +20,6 @@ With these values absent, no HTTP Push forwarder is enabled.
 
 ## Demo fleet and protocol status
 
-Migration `003_demo_fleet.sql` adds 350 deterministic Teltonika FMC920 virtual trucks with unique 15-digit IMEIs and forestry-area starting positions. It is idempotent by IMEI and does not delete or rewrite operator-created devices. Device discovery remains server-side, capped at 100 results per request; the UI uses 50-row search pages rather than rendering the whole fleet.
+Migration `003_demo_fleet.sql` and API startup provisioning fill the database to a target of 350 devices using deterministic Teltonika FMC920 virtual trucks with unique 15-digit IMEIs and forestry-area starting positions. Existing operator-created devices count toward the 350-device target and are never deleted or rewritten. Startup provisioning is transactionally serialized and idempotent, so an already-populated Runtime database is repaired on activation without requiring an implicit schema migration. Device discovery remains server-side, capped at 100 results per request; the UI uses 50-row search pages rather than rendering the whole fleet.
 
 The server-owned simulation runtime reports configured output paths per selected device. `http-push`, `mqtt`, and `teltonika-direct` are `ready` before the first tick, `sending` after a successful forward, and `error` after a failed forward. These are runtime observations, not synthetic frontend health indicators. Unconfigured outputs are shown as such.
