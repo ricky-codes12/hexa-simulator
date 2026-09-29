@@ -61,3 +61,8 @@ The enrollment UI renders the backend-issued `otpauth://` URI as a local QR code
 Simulation progression is owned by the Go API, not by a browser timer. `POST /api/devices/{id}/simulation` changes start/pause/resume/stop and drive controls; the runtime ticks approximately every three seconds, persists current telemetry, and fans each online record to configured outputs. Reopening the UI only observes and controls this state, so it must not create a second simulation loop.
 
 Output adapters are optional and environment-owned: existing Hexa.Sensor HTTP Push, persistent per-IMEI Teltonika Direct TCP with Codec 8 or 8E and acknowledgement/reconnect, and MQTT 3.1.1 QoS 1 publish using the `hexa.sensor/telemetry/v1` JSON contract. MQTT credentials and Sensor keys remain protected Runtime configuration and must never be committed or returned to the browser. Teltonika/Sitepat cloud mocks are intentionally out of scope until authoritative vendor API contracts exist.
+
+
+## Concurrent demo fleet startup
+
+After PostgreSQL demo-fleet provisioning completes, the API restores the complete persisted fleet into the server-owned runtime. Each device has exactly one cancellable loop. The loops are started with deterministic phase offsets spread across one telemetry interval, preventing all 350 devices from writing and forwarding on the same instant while preserving an approximately three-second cadence per device. Browser sessions are observers/controllers only; they are not required for any fleet clock. Per-device stop/pause/start semantics remain authoritative after startup.

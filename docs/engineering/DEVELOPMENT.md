@@ -23,3 +23,8 @@ With these values absent, no HTTP Push forwarder is enabled.
 Migration `003_demo_fleet.sql` and API startup provisioning fill the database to a target of 350 devices using deterministic Teltonika FMC920 virtual trucks with unique 15-digit IMEIs and forestry-area starting positions. Existing operator-created devices count toward the 350-device target and are never deleted or rewritten. Startup provisioning is transactionally serialized and idempotent, so an already-populated Runtime database is repaired on activation without requiring an implicit schema migration. Device discovery remains server-side, capped at 100 results per request; the UI uses 50-row search pages rather than rendering the whole fleet.
 
 The server-owned simulation runtime reports configured output paths per selected device. `http-push`, `mqtt`, and `teltonika-direct` are `ready` before the first tick, `sending` after a successful forward, and `error` after a failed forward. These are runtime observations, not synthetic frontend health indicators. Unconfigured outputs are shown as such.
+
+
+## Concurrent demo fleet runtime
+
+After demo-fleet provisioning, API startup starts every persisted device in the server-owned simulation runtime. The default 350-device fleet therefore remains live without an open browser. Initial device ticks are deterministically phased across the three-second interval rather than emitted as one startup burst. Manual pause/stop/start controls remain per-device and do not create duplicate loops. Protocol outputs continue to follow protected Runtime configuration.
