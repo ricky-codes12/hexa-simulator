@@ -32,3 +32,9 @@ After demo-fleet provisioning, API startup starts every persisted device in the 
 ### Fleet-scale MQTT and Teltonika Direct
 
 Configured outputs are dispatched asynchronously from the simulation clock through bounded worker queues. Do not raise queue/worker limits to mask an unhealthy downstream service; inspect Protocol Outputs and the target service instead. MQTT emits the canonical Hexa.Sensor telemetry envelope on the configured topic. Teltonika Direct keeps independent persistent sessions per IMEI so the demo fleet can progress concurrently. Runtime addresses remain protected external configuration; the repository deliberately does not hard-code a broker or Sensor listener address.
+
+### Fleet Live Map rendering
+
+The Live Map visualizes the complete persisted demo fleet, not only the selected device. The UI pages through the existing bounded device discovery API (100 devices per request), then renders the fleet as a single MapLibre GeoJSON source/layer so the normal 350-device demo does not create hundreds of DOM markers. Each three-second server snapshot is interpolated client-side across the same interval for smooth fleet motion. The selected device retains its detailed marker, trail, controls, and telemetry panel. Clicking a fleet point selects that device.
+
+Map rendering is observational only: closing or refreshing the browser never owns or stops simulation clocks. The server-owned runtime remains authoritative for all device movement and protocol output.
