@@ -74,14 +74,18 @@ func SecureHandlerWithRuntime(revision string, store DeviceStore, auth AuthStore
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/auth/login", func(w http.ResponseWriter, r *http.Request) {
-		var in struct{ Email, Password, Code string }
+		var in struct{ Username, Email, Password, Code string }
 		if json.NewDecoder(r.Body).Decode(&in) != nil {
 			writeError(w, 400, "invalid login payload")
 			return
 		}
-		u, err := auth.UserByEmail(r.Context(), strings.ToLower(strings.TrimSpace(in.Email)))
+		username := in.Username
+		if username == "" {
+			username = in.Email // Backward compatibility for existing API clients.
+		}
+		u, err := auth.UserByEmail(r.Context(), strings.ToLower(strings.TrimSpace(username)))
 		if err != nil || !verifyPassword(u.PasswordHash, in.Password) {
-			writeError(w, 401, "invalid email or password")
+			writeError(w, 401, "invalid username or password")
 			return
 		}
 		if u.MFAEnabled && strings.TrimSpace(in.Code) == "" {
@@ -442,12 +446,12 @@ func decryptSecret(v string) string {
 	return string(plain)
 }
 
-func EnsureBootstrapAdmin(ctx context.Context, store AuthStore, email, password string) error {
+func EnsureBootstrapAdmin(ctx context.Context, store AuthStore, username, password string) error {
 	if len(os.Getenv("SIM_SECURITY_KEY")) < 32 {
 		return fmt.Errorf("SIM_SECURITY_KEY must be at least 32 characters")
 	}
-	if strings.TrimSpace(email) == "" {
-		email = "admin@simulator.local"
+	if strings.TrimSpace(username) == "" {
+		username = "hexa-dev"
 	}
-	return store.EnsureAdmin(ctx, strings.ToLower(strings.TrimSpace(email)), "Simulator Administrator", hashPassword(password))
+	return store.EnsureAdmin(ctx, strings.ToLower(strings.TrimSpace(username)), "Simulator Administrator", hashPassword(password))
 }

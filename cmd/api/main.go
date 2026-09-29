@@ -66,7 +66,11 @@ func serve() {
 			fmt.Fprintln(os.Stderr, "SIM_ADMIN_PASSWORD must be set to at least 12 characters")
 			os.Exit(1)
 		}
-		if err := apphttp.EnsureBootstrapAdmin(ctx, authStore, os.Getenv("SIM_ADMIN_EMAIL"), adminPassword); err != nil {
+		adminUsername := os.Getenv("SIM_ADMIN_USERNAME")
+		if adminUsername == "" {
+			adminUsername = os.Getenv("SIM_ADMIN_EMAIL") // Backward-compatible configuration fallback.
+		}
+		if err := apphttp.EnsureBootstrapAdmin(ctx, authStore, adminUsername, adminPassword); err != nil {
 			fmt.Fprintf(os.Stderr, "bootstrap admin: %v\n", err)
 			os.Exit(1)
 		}
