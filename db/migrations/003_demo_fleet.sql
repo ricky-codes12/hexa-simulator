@@ -1,26 +1,4 @@
--- Fill the database to a deterministic 350-device demo fleet target without
--- deleting or rewriting operator-created devices. Safe to re-run.
-WITH deficit AS (
-  SELECT GREATEST(350 - count(*), 0)::integer AS needed FROM devices
-), candidates AS (
-  SELECT
-    n,
-    '35630704' || lpad((2441000 + n)::text, 7, '0') AS imei
-  FROM generate_series(1, 1400) AS n
-), available AS (
-  SELECT c.n, c.imei
-  FROM candidates c
-  WHERE NOT EXISTS (SELECT 1 FROM devices d WHERE d.imei = c.imei)
-  ORDER BY c.n
-  LIMIT (SELECT needed FROM deficit)
-)
-INSERT INTO devices(name, imei, model, latitude, longitude, heading)
-SELECT
-  'Truck ' || lpad(n::text, 3, '0'),
-  imei,
-  'Teltonika FMC920',
-  -3.020 + ((n - 1) % 14) * 0.0055,
-  104.715 + ((n - 1) % 25) * 0.0068,
-  ((n * 47) % 360)::double precision
-FROM available
-ON CONFLICT (imei) DO NOTHING;
+-- Superseded by 004_fleet.sql. This migration used to insert a 350-truck grid whose IMEIs
+-- (35630704244xxxx) collide with Hexa.Sensor's own simulator fleet. The API now seeds the demo
+-- fleet from its composition at startup (internal/fleet), so this file does nothing. It stays
+-- because scripts/migrate.sh applies every file in order.

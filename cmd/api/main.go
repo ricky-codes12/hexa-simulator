@@ -7,9 +7,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
+	"hexa-simulator/internal/fleet"
 	apphttp "hexa-simulator/internal/httpapi"
 	"hexa-simulator/internal/mqttout"
 	"hexa-simulator/internal/postgresstore"
@@ -31,10 +34,17 @@ func main() {
 		health(os.Args[2:])
 	case "serve":
 		serve()
+	case "sensor-onboard":
+		os.Exit(sensorOnboard(os.Args[2:]))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", command)
 		os.Exit(2)
 	}
+}
+
+func fail(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+	os.Exit(1)
 }
 
 func serve() {
@@ -44,82 +54,82 @@ func serve() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	outputs, err := configuredOutputs()
+	if err != nil {
+		fail("outputs: %v", err)
+	}
+	var names []string
+	for _, o := range outputs {
+		names = append(names, o.Name())
+	}
+
 	var store apphttp.DeviceStore
 	var authStore apphttp.AuthStore
+	var runtime *apphttp.SimulationRuntime
 	if databaseURL := os.Getenv("DATABASE_URL"); databaseURL != "" {
 		postgres, err := postgresstore.Open(ctx, databaseURL)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "database: %v\n", err)
-			os.Exit(1)
+			fail("database: %v", err)
 		}
 		defer postgres.Close()
+		if err := postgres.CheckSchema(ctx); err != nil {
+			fail("database: %v", err)
+		}
 		authPostgres, err := postgresstore.Open(ctx, databaseURL)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "authentication database: %v\n", err)
-			os.Exit(1)
+			fail("authentication database: %v", err)
 		}
 		defer authPostgres.Close()
-		if total, err := postgres.EnsureDemoFleet(ctx, 350); err != nil {
-			fmt.Fprintf(os.Stderr, "demo fleet: %v\n", err)
-			os.Exit(1)
-		} else {
-			fmt.Printf("demo fleet: %d devices ready\n", total)
+
+		composition, err := fleet.ParseComposition(os.Getenv("SIM_DEMO_FLEET"))
+		if err != nil {
+			fail("SIM_DEMO_FLEET: %v", err)
 		}
+		seed := int64(7)
+		if raw := strings.TrimSpace(os.Getenv("SIM_SEED")); raw != "" {
+			if seed, err = strconv.ParseInt(raw, 10, 64); err != nil {
+				fail("SIM_SEED must be an integer")
+			}
+		}
+		var roster []apphttp.SeedDevice
+		for _, u := range fleet.Roster(composition, seed) {
+			roster = append(roster, apphttp.SeedDevice{Name: u.Name, IMEI: u.IMEI, Model: u.Model, Kind: u.Kind.Key, Output: u.Output, Estate: u.Estate})
+		}
+		total, added, removed, err := postgres.EnsureFleet(ctx, roster)
+		if err != nil {
+			fail("demo fleet: %v", err)
+		}
+		fmt.Printf("demo fleet: %d devices (%d seeded: %s; %d added, %d removed)\n", total, len(roster), composition, added, removed)
+
 		store = postgres
 		authStore = authPostgres
 		adminPassword := os.Getenv("SIM_ADMIN_PASSWORD")
 		if len(adminPassword) < 12 {
-			fmt.Fprintln(os.Stderr, "SIM_ADMIN_PASSWORD must be set to at least 12 characters")
-			os.Exit(1)
+			fail("SIM_ADMIN_PASSWORD must be set to at least 12 characters")
 		}
 		adminUsername := os.Getenv("SIM_ADMIN_USERNAME")
 		if adminUsername == "" {
 			adminUsername = os.Getenv("SIM_ADMIN_EMAIL") // Backward-compatible configuration fallback.
 		}
 		if err := apphttp.EnsureBootstrapAdmin(ctx, authStore, adminUsername, adminPassword); err != nil {
-			fmt.Fprintf(os.Stderr, "bootstrap admin: %v\n", err)
-			os.Exit(1)
+			fail("bootstrap admin: %v", err)
 		}
-	}
-	gatewayAddress := os.Getenv("TELTONIKA_GATEWAY_ADDR")
-	pushURL := os.Getenv("SIM_SENSOR_PUSH_URL")
-	pushKey := os.Getenv("SIM_SENSOR_PUSH_KEY")
-	var forwarders []apphttp.TelemetryForwarder
-	if gatewayAddress != "" {
-		tcpClient := &teltonika.Client{Address: gatewayAddress, Timeout: gatewayTimeout(), Codec: os.Getenv("TELTONIKA_CODEC")}
-		defer tcpClient.Close()
-		forwarders = append(forwarders, teltonikaForwarder{client: tcpClient})
-	}
-	if pushURL != "" || pushKey != "" {
-		if pushURL == "" || pushKey == "" {
-			fmt.Fprintln(os.Stderr, "SIM_SENSOR_PUSH_URL and SIM_SENSOR_PUSH_KEY must be configured together")
-			os.Exit(1)
-		}
-		forwarders = append(forwarders, sensorPushForwarder{client: sensorpush.Client{URL: pushURL, Key: pushKey, Timeout: sensorPushTimeout()}})
-	}
-	var mqttClient *mqttout.Client
-	if mqttURL := os.Getenv("SIM_MQTT_URL"); mqttURL != "" {
-		topic := os.Getenv("SIM_MQTT_TOPIC")
-		if topic == "" {
-			topic = "{imei}/data"
-		}
-		mqttClient = &mqttout.Client{URL: mqttURL, Topic: topic, Timeout: mqttTimeout()}
-		defer mqttClient.Close()
-		forwarders = append(forwarders, mqttForwarder{client: mqttClient})
-	}
-	var runtime *apphttp.SimulationRuntime
-	if store != nil {
-		runtime = apphttp.NewSimulationRuntime(ctx, store, 3*time.Second, forwarders...)
+
+		runtime = apphttp.NewSimulationRuntime(ctx, postgres, apphttp.RuntimeOptions{Interval: duration("SIM_REPORT_INTERVAL", 5*time.Second), Seed: seed, Outputs: outputs})
 		started, err := runtime.StartFleet()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "simulation fleet runtime: %v\n", err)
-			os.Exit(1)
+			fail("simulation fleet runtime: %v", err)
 		}
-		fmt.Printf("simulation fleet runtime: %d devices running\n", started)
+		configured := strings.Join(names, ", ")
+		if configured == "" {
+			configured = "none configured"
+		}
+		fmt.Printf("simulation fleet runtime: %d devices running, outputs: %s\n", started, configured)
 	}
 	server := &http.Server{
 		Addr:              address,
-		Handler:           apphttp.SecureHandlerWithRuntime(revision, store, authStore, os.Getenv("WEB_ROOT"), runtime, forwarders...),
+		Handler:           apphttp.SecureHandlerWithRuntime(revision, store, authStore, os.Getenv("WEB_ROOT"), runtime),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {
@@ -128,11 +138,53 @@ func serve() {
 		defer cancel()
 		_ = server.Shutdown(shutdown)
 	}()
-	fmt.Printf("listening: http://%s revision=%s database=%t teltonika_gateway=%t sensor_push=%t\n", address, revision, store != nil, gatewayAddress != "", pushURL != "")
+	fmt.Printf("listening: http://%s revision=%s database=%t outputs=%s\n", address, revision, store != nil, strings.Join(names, ","))
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		fail("%v", err)
 	}
+}
+
+// configuredOutputs builds the outputs whose settings are present. Secrets come only from the
+// protected environment.
+func configuredOutputs() ([]apphttp.Output, error) {
+	var out []apphttp.Output
+	if url := os.Getenv("SIM_MQTT_URL"); url != "" {
+		topic := os.Getenv("SIM_MQTT_TOPIC")
+		if topic == "" {
+			topic = "{imei}/data"
+		}
+		client := &mqttout.Client{URL: url, Topic: topic, ClientID: os.Getenv("SIM_MQTT_CLIENT_ID"), Username: os.Getenv("SIM_MQTT_USERNAME"),
+			Password: os.Getenv("SIM_MQTT_PASSWORD"), Timeout: duration("SIM_MQTT_TIMEOUT", 5*time.Second)}
+		out = append(out, apphttp.MQTTOutput{Client: client})
+	}
+	if addr := os.Getenv("TELTONIKA_GATEWAY_ADDR"); addr != "" {
+		codec := os.Getenv("TELTONIKA_CODEC")
+		if codec != "" && !strings.EqualFold(codec, "8") && !strings.EqualFold(codec, "8E") {
+			return nil, fmt.Errorf("TELTONIKA_CODEC must be 8 or 8E")
+		}
+		out = append(out, apphttp.TeltonikaOutput{Client: &teltonika.Client{Address: addr, Timeout: duration("TELTONIKA_GATEWAY_TIMEOUT", 5*time.Second), Codec: codec}})
+	}
+	pushURL, pushKey := os.Getenv("SIM_SENSOR_PUSH_URL"), os.Getenv("SIM_SENSOR_PUSH_KEY")
+	if pushURL != "" || pushKey != "" {
+		if pushURL == "" || pushKey == "" {
+			return nil, fmt.Errorf("SIM_SENSOR_PUSH_URL and SIM_SENSOR_PUSH_KEY must be configured together")
+		}
+		out = append(out, apphttp.HTTPPushOutput{Client: sensorpush.Client{URL: pushURL, Key: pushKey, Timeout: duration("SIM_SENSOR_PUSH_TIMEOUT", 5*time.Second)}})
+	}
+	return out, nil
+}
+
+func duration(name string, def time.Duration) time.Duration {
+	value := os.Getenv(name)
+	if value == "" {
+		return def
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil || d <= 0 {
+		fmt.Fprintf(os.Stderr, "invalid %s %q; using %s\n", name, value, def)
+		return def
+	}
+	return d
 }
 
 func health(args []string) {
@@ -142,81 +194,11 @@ func health(args []string) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	response, err := client.Get("http://" + *address + "/healthz")
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		fail("%v", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		fmt.Fprintf(os.Stderr, "health status: %s\n", response.Status)
-		os.Exit(1)
+		fail("health status: %s", response.Status)
 	}
 	fmt.Println("healthy")
-}
-
-type teltonikaForwarder struct{ client *teltonika.Client }
-
-func (f teltonikaForwarder) OutputName() string { return "teltonika-direct" }
-
-func (f teltonikaForwarder) ForwardTelemetry(ctx context.Context, device apphttp.Device) error {
-	return f.client.Send(ctx, teltonika.Telemetry{
-		IMEI: device.IMEI, Timestamp: device.UpdatedAt, Latitude: device.Latitude, Longitude: device.Longitude,
-		Speed: device.Speed, Heading: device.Heading, Ignition: device.Ignition,
-	})
-}
-
-func gatewayTimeout() time.Duration {
-	value := os.Getenv("TELTONIKA_GATEWAY_TIMEOUT")
-	if value == "" {
-		return 5 * time.Second
-	}
-	timeout, err := time.ParseDuration(value)
-	if err != nil || timeout <= 0 {
-		fmt.Fprintf(os.Stderr, "invalid TELTONIKA_GATEWAY_TIMEOUT %q; using 5s\n", value)
-		return 5 * time.Second
-	}
-	return timeout
-}
-
-type sensorPushForwarder struct{ client sensorpush.Client }
-
-func (f sensorPushForwarder) OutputName() string { return "http-push" }
-
-func (f sensorPushForwarder) ForwardTelemetry(ctx context.Context, device apphttp.Device) error {
-	return f.client.Send(ctx, sensorpush.Telemetry{
-		HardwareID: device.IMEI, DeviceTime: device.UpdatedAt, Latitude: device.Latitude, Longitude: device.Longitude,
-		Speed: device.Speed, Heading: device.Heading, Ignition: device.Ignition, Movement: device.Speed > 0,
-	})
-}
-
-func sensorPushTimeout() time.Duration {
-	value := os.Getenv("SIM_SENSOR_PUSH_TIMEOUT")
-	if value == "" {
-		return 5 * time.Second
-	}
-	timeout, err := time.ParseDuration(value)
-	if err != nil || timeout <= 0 {
-		fmt.Fprintf(os.Stderr, "invalid SIM_SENSOR_PUSH_TIMEOUT %q; using 5s\n", value)
-		return 5 * time.Second
-	}
-	return timeout
-}
-
-type mqttForwarder struct{ client *mqttout.Client }
-
-func (f mqttForwarder) OutputName() string { return "mqtt" }
-
-func (f mqttForwarder) ForwardTelemetry(ctx context.Context, device apphttp.Device) error {
-	return f.client.Publish(ctx, mqttout.Telemetry{HardwareID: device.IMEI, DeviceTime: device.UpdatedAt, Latitude: device.Latitude, Longitude: device.Longitude, Speed: device.Speed, Heading: device.Heading, Ignition: device.Ignition, Movement: device.Speed > 0})
-}
-func mqttTimeout() time.Duration {
-	value := os.Getenv("SIM_MQTT_TIMEOUT")
-	if value == "" {
-		return 5 * time.Second
-	}
-	timeout, err := time.ParseDuration(value)
-	if err != nil || timeout <= 0 {
-		fmt.Fprintf(os.Stderr, "invalid SIM_MQTT_TIMEOUT %q; using 5s\n", value)
-		return 5 * time.Second
-	}
-	return timeout
 }

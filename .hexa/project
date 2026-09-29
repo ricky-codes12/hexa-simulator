@@ -95,23 +95,30 @@ wait_health() {
   return 1
 }
 
+# Simulator settings the Dev API receives through its protected (0600) environment file.
+dev_env_names='SIM_ADMIN_USERNAME SIM_ADMIN_EMAIL SIM_ADMIN_PASSWORD SIM_SECURITY_KEY SIM_COOKIE_SECURE SIM_DEMO_FLEET SIM_SEED SIM_REPORT_INTERVAL SIM_SENSOR_PUSH_URL SIM_SENSOR_PUSH_KEY SIM_SENSOR_PUSH_TIMEOUT SIM_MQTT_URL SIM_MQTT_TOPIC SIM_MQTT_TIMEOUT SIM_MQTT_USERNAME SIM_MQTT_PASSWORD SIM_MQTT_CLIENT_ID TELTONIKA_CODEC'
+
 run_dev_start() {
   run_doctor
   [ -d web/node_modules ] || ./scripts/setup.sh
   mkdir -p "$project_state_dir/bin"
   binary=$(dev_binary); revision=$(git rev-parse HEAD)
   go build -trimpath -ldflags "-X main.revision=$revision" -o "$binary" ./cmd/api
-  api_listen='127.0.0.1:8080'; web_listen='127.0.0.1:5173'; database_url=${DATABASE_URL:-}; gateway_addr=${TELTONIKA_GATEWAY_ADDR:-}; gateway_timeout=${TELTONIKA_GATEWAY_TIMEOUT:-5s}
-  dev_env_file=''
-  if [ -n "${SIM_SENSOR_PUSH_URL:-}" ] || [ -n "${SIM_SENSOR_PUSH_KEY:-}" ] || [ -n "${SIM_MQTT_URL:-}" ]; then
-    if [ -n "${SIM_SENSOR_PUSH_URL:-}" ] || [ -n "${SIM_SENSOR_PUSH_KEY:-}" ]; then [ -n "${SIM_SENSOR_PUSH_URL:-}" ] && [ -n "${SIM_SENSOR_PUSH_KEY:-}" ] || action_error 'SIM_SENSOR_PUSH_URL and SIM_SENSOR_PUSH_KEY must be configured together'; fi
-    dev_env_file="$project_state_dir/dev-secrets.env"; umask 077; mqtt_topic=${SIM_MQTT_TOPIC:-}; [ -n "$mqtt_topic" ] || mqtt_topic='{imei}/data'
-    { printf 'SIM_SENSOR_PUSH_URL=%s\n' "${SIM_SENSOR_PUSH_URL:-}"; printf 'SIM_SENSOR_PUSH_KEY=%s\n' "${SIM_SENSOR_PUSH_KEY:-}"; printf 'SIM_SENSOR_PUSH_TIMEOUT=%s\n' "${SIM_SENSOR_PUSH_TIMEOUT:-5s}"; printf 'TELTONIKA_CODEC=%s\n' "${TELTONIKA_CODEC:-8E}"; printf 'SIM_MQTT_URL=%s\n' "${SIM_MQTT_URL:-}"; printf 'SIM_MQTT_TOPIC=%s\n' "$mqtt_topic"; printf 'SIM_MQTT_TIMEOUT=%s\n' "${SIM_MQTT_TIMEOUT:-5s}"; } >"$dev_env_file"
-  fi
+  api_port=${SIM_DEV_API_PORT:-8080}; web_port=${SIM_DEV_WEB_PORT:-5173}
+  api_listen="127.0.0.1:$api_port"; web_listen="127.0.0.1:$web_port"; database_url=${DATABASE_URL:-}; gateway_addr=${TELTONIKA_GATEWAY_ADDR:-}; gateway_timeout=${TELTONIKA_GATEWAY_TIMEOUT:-5s}
+  if [ -n "${SIM_SENSOR_PUSH_URL:-}" ] || [ -n "${SIM_SENSOR_PUSH_KEY:-}" ]; then [ -n "${SIM_SENSOR_PUSH_URL:-}" ] && [ -n "${SIM_SENSOR_PUSH_KEY:-}" ] || action_error 'SIM_SENSOR_PUSH_URL and SIM_SENSOR_PUSH_KEY must be configured together'; fi
+  dev_env_file="$project_state_dir/dev-secrets.env"
+  umask 077
+  : >"$dev_env_file"
+  for name in $dev_env_names; do
+    eval "value=\${$name:-}"
+    [ -z "$value" ] || printf '%s=%s\n' "$name" "$value" >>"$dev_env_file"
+  done
   start_api "$dev_api_unit" "$api_listen" "$binary" "$database_url" '' "$gateway_addr" "$gateway_timeout" "$dev_env_file"
   wait_health "$binary" "$api_listen" || { systemctl --user stop "$dev_api_unit" >/dev/null 2>&1 || true; action_error 'development API did not become healthy'; }
   systemctl --user stop "$dev_web_unit" >/dev/null 2>&1 || true
-  systemd-run --user --quiet --collect --unit="$dev_web_unit" --property=Restart=on-failure --property=RestartSec=2s --working-directory="$project_root/web" -- bun run dev -- --host 127.0.0.1 --port 5173
+  systemd-run --user --quiet --collect --unit="$dev_web_unit" --property=Restart=on-failure --property=RestartSec=2s --working-directory="$project_root/web" \
+    --setenv="VITE_API_TARGET=http://$api_listen" --setenv="VITE_PORT=$web_port" -- bun run dev -- --host 127.0.0.1 --port "$web_port"
   { printf 'revision=%s\n' "$revision"; printf 'api=%s\n' "$api_listen"; printf 'web=%s\n' "$web_listen"; if [ -n "$database_url" ]; then printf 'database=configured\n'; else printf 'database=not-configured\n'; fi; } >"$(dev_state)"
   printf 'dev start: web=http://%s api=http://%s database=%s\n' "$web_listen" "$api_listen" "$(if [ -n "$database_url" ]; then printf configured; else printf not-configured; fi)"
 }

@@ -1,10 +1,6 @@
 package httpapi
 
 import (
-	"archive/zip"
-	"bytes"
-	"context"
-	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -14,57 +10,11 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"hexa-simulator/internal/fleet"
+	"hexa-simulator/internal/scenario"
+	"hexa-simulator/internal/world"
 )
-
-type Device struct {
-	ID        int64     `json:"id"`
-	Name      string    `json:"name"`
-	IMEI      string    `json:"imei"`
-	Model     string    `json:"model"`
-	Status    string    `json:"status"`
-	Latitude  float64   `json:"latitude"`
-	Longitude float64   `json:"longitude"`
-	Speed     float64   `json:"speed"`
-	Heading   float64   `json:"heading"`
-	Ignition  bool      `json:"ignition"`
-	UpdatedAt time.Time `json:"updated_at"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
-type DeviceInput struct {
-	Name  string `json:"name"`
-	IMEI  string `json:"imei"`
-	Model string `json:"model"`
-}
-
-type TelemetryInput struct {
-	Status    string  `json:"status"`
-	Latitude  float64 `json:"latitude"`
-	Longitude float64 `json:"longitude"`
-	Speed     float64 `json:"speed"`
-	Heading   float64 `json:"heading"`
-	Ignition  bool    `json:"ignition"`
-}
-
-type TelemetryForwarder interface {
-	ForwardTelemetry(context.Context, Device) error
-}
-
-type DeviceSearchStore interface {
-	SearchDevices(context.Context, string, int, int) ([]Device, int, error)
-}
-
-type DeviceLookupStore interface {
-	GetDevice(context.Context, int64) (Device, error)
-}
-
-type DeviceStore interface {
-	Ping(context.Context) error
-	ListDevices(context.Context) ([]Device, error)
-	CreateDevice(context.Context, DeviceInput) (Device, error)
-	UpdateTelemetry(context.Context, int64, TelemetryInput) (Device, error)
-	DeleteDevice(context.Context, int64) error
-}
 
 type healthResponse struct {
 	Revision           string `json:"revision"`
@@ -72,253 +22,543 @@ type healthResponse struct {
 	DatabaseReady      bool   `json:"database_ready"`
 }
 
-func Handler(revision string, store DeviceStore, webRoot string, forwarders ...TelemetryForwarder) http.Handler {
-	return HandlerWithRuntime(revision, store, webRoot, nil, forwarders...)
+// Handler serves the API without a fleet runtime.
+func Handler(revision string, store DeviceStore, webRoot string) http.Handler {
+	return HandlerWithRuntime(revision, store, webRoot, nil)
 }
 
-func HandlerWithRuntime(revision string, store DeviceStore, webRoot string, runtime *SimulationRuntime, forwarders ...TelemetryForwarder) http.Handler {
+// HandlerWithRuntime serves the API, the fleet runtime's controls and the web console.
+func HandlerWithRuntime(revision string, store DeviceStore, webRoot string, runtime *SimulationRuntime) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(writer http.ResponseWriter, request *http.Request) {
+	needStore := func(w http.ResponseWriter) bool {
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "PostgreSQL is not configured; set DATABASE_URL")
+			return false
+		}
+		return true
+	}
+	needRuntime := func(w http.ResponseWriter) bool {
+		if runtime == nil {
+			writeError(w, http.StatusServiceUnavailable, "server-side simulation runtime is unavailable")
+			return false
+		}
+		return true
+	}
+	deviceID := func(w http.ResponseWriter, r *http.Request) (int64, bool) {
+		var id int64
+		if _, err := fmtSscan(r.PathValue("id"), &id); err != nil || id < 1 {
+			writeError(w, http.StatusBadRequest, "invalid device id")
+			return 0, false
+		}
+		return id, true
+	}
+
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		ready := false
 		status := http.StatusOK
 		if store != nil {
-			ready = store.Ping(request.Context()) == nil
+			ready = store.Ping(r.Context()) == nil
 			if !ready {
 				status = http.StatusServiceUnavailable
 			}
 		}
-		writeJSON(writer, status, healthResponse{Revision: revision, DatabaseConfigured: store != nil, DatabaseReady: ready})
+		writeJSON(w, status, healthResponse{Revision: revision, DatabaseConfigured: store != nil, DatabaseReady: ready})
 	})
-	mux.HandleFunc("GET /api/devices", func(writer http.ResponseWriter, request *http.Request) {
-		if store == nil {
-			writeError(writer, http.StatusServiceUnavailable, "PostgreSQL is not configured; set DATABASE_URL")
+
+	mux.HandleFunc("GET /api/devices", func(w http.ResponseWriter, r *http.Request) {
+		if !needStore(w) {
 			return
 		}
-		query := strings.TrimSpace(request.URL.Query().Get("query"))
+		query := strings.TrimSpace(r.URL.Query().Get("query"))
 		limit, offset := 0, 0
-		if raw := request.URL.Query().Get("limit"); raw != "" {
+		if raw := r.URL.Query().Get("limit"); raw != "" {
 			fmt.Sscanf(raw, "%d", &limit)
 		}
-		if raw := request.URL.Query().Get("offset"); raw != "" {
+		if raw := r.URL.Query().Get("offset"); raw != "" {
 			fmt.Sscanf(raw, "%d", &offset)
 		}
 		if limit > 0 {
-			if limit > 100 {
-				limit = 100
-			}
-			if offset < 0 {
-				offset = 0
-			}
+			limit = min(limit, 100)
+			offset = max(offset, 0)
 			if searchable, ok := store.(DeviceSearchStore); ok {
-				items, total, err := searchable.SearchDevices(request.Context(), query, limit, offset)
+				items, total, err := searchable.SearchDevices(r.Context(), query, limit, offset)
 				if err != nil {
-					writeError(writer, http.StatusInternalServerError, "load devices")
+					writeError(w, http.StatusInternalServerError, "load devices")
 					return
 				}
-				writeJSON(writer, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset})
+				writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset})
 				return
 			}
 		}
-		items, err := store.ListDevices(request.Context())
+		items, err := store.ListDevices(r.Context())
 		if err != nil {
-			writeError(writer, http.StatusInternalServerError, "load devices")
+			writeError(w, http.StatusInternalServerError, "load devices")
 			return
 		}
 		if query != "" {
 			q := strings.ToLower(query)
 			filtered := items[:0]
 			for _, item := range items {
-				if strings.Contains(strings.ToLower(item.Name), q) || strings.Contains(strings.ToLower(item.IMEI), q) || strings.Contains(strings.ToLower(item.Model), q) {
-					filtered = append(filtered, item)
+				for _, field := range []string{item.Name, item.IMEI, item.Model, item.Kind, item.Estate, item.Output} {
+					if strings.Contains(strings.ToLower(field), q) {
+						filtered = append(filtered, item)
+						break
+					}
 				}
 			}
 			items = filtered
 		}
 		total := len(items)
 		if limit > 0 {
-			end := offset + limit
-			if offset > total {
-				offset = total
-			}
-			if end > total {
-				end = total
-			}
-			items = items[offset:end]
+			offset = min(offset, total)
+			items = items[offset:min(offset+limit, total)]
 		}
-		writeJSON(writer, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset})
+		writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset})
 	})
-	mux.HandleFunc("GET /api/devices/{id}/simulation", func(writer http.ResponseWriter, request *http.Request) {
-		if runtime == nil {
-			writeError(writer, http.StatusServiceUnavailable, "server-side simulation runtime is unavailable")
+
+	mux.HandleFunc("POST /api/devices", func(w http.ResponseWriter, r *http.Request) {
+		if !needStore(w) {
 			return
 		}
-		var id int64
-		if _, err := fmtSscan(request.PathValue("id"), &id); err != nil || id < 1 {
-			writeError(writer, http.StatusBadRequest, "invalid device id")
+		var input DeviceInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid device payload")
 			return
 		}
-		writeJSON(writer, http.StatusOK, runtime.State(id))
+		input.Name, input.IMEI, input.Model = strings.TrimSpace(input.Name), strings.TrimSpace(input.IMEI), strings.TrimSpace(input.Model)
+		input.Kind, input.Output, input.Estate = strings.TrimSpace(input.Kind), strings.TrimSpace(input.Output), strings.ToUpper(strings.TrimSpace(input.Estate))
+		if input.Name == "" || input.IMEI == "" {
+			writeError(w, http.StatusBadRequest, "name and imei are required")
+			return
+		}
+		if input.Kind == "" {
+			input.Kind = fleet.DefaultKind.Key
+		}
+		kind, ok := fleet.KindByKey(input.Kind)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "unknown device kind")
+			return
+		}
+		if input.Model == "" {
+			input.Model = kind.Model(1)
+		}
+		if input.Output == "" {
+			input.Output = fleet.OutputAll
+		}
+		if !fleet.ValidOutput(input.Output) {
+			writeError(w, http.StatusBadRequest, "output must be mqtt, teltonika, http-push, all or none")
+			return
+		}
+		if input.Estate == "" {
+			input.Estate = fleet.Plan(kind, 1, 0).Estate
+		}
+		if !validEstate(input.Estate) {
+			writeError(w, http.StatusBadRequest, "estate must be KNG, MRT or SLG")
+			return
+		}
+		item, err := store.CreateDevice(r.Context(), input)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "create device")
+			return
+		}
+		if runtime != nil {
+			runtime.AddDevice(item)
+		}
+		writeJSON(w, http.StatusCreated, item)
 	})
-	mux.HandleFunc("POST /api/devices/{id}/simulation", func(writer http.ResponseWriter, request *http.Request) {
-		if runtime == nil {
-			writeError(writer, http.StatusServiceUnavailable, "server-side simulation runtime is unavailable")
+
+	mux.HandleFunc("GET /api/devices/{id}", func(w http.ResponseWriter, r *http.Request) {
+		lookup, ok := store.(DeviceLookupStore)
+		if !needStore(w) || !ok {
+			if store != nil {
+				writeError(w, http.StatusServiceUnavailable, "device lookup is unavailable")
+			}
 			return
 		}
-		var id int64
-		if _, err := fmtSscan(request.PathValue("id"), &id); err != nil || id < 1 {
-			writeError(writer, http.StatusBadRequest, "invalid device id")
+		id, ok := deviceID(w, r)
+		if !ok {
+			return
+		}
+		item, err := lookup.GetDevice(r.Context(), id)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "device not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, item)
+	})
+
+	mux.HandleFunc("PATCH /api/devices/{id}", func(w http.ResponseWriter, r *http.Request) {
+		fs, ok := store.(FleetStore)
+		if !ok || !needStore(w) {
+			if store != nil {
+				writeError(w, http.StatusServiceUnavailable, "device updates need the fleet store")
+			}
+			return
+		}
+		id, ok := deviceID(w, r)
+		if !ok {
+			return
+		}
+		var patch DevicePatch
+		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid device patch")
+			return
+		}
+		if patch.Name != nil && strings.TrimSpace(*patch.Name) == "" {
+			writeError(w, http.StatusBadRequest, "name cannot be empty")
+			return
+		}
+		if patch.Output != nil && !fleet.ValidOutput(*patch.Output) {
+			writeError(w, http.StatusBadRequest, "output must be mqtt, teltonika, http-push, all or none")
+			return
+		}
+		if patch.Kind != nil {
+			if _, ok := fleet.KindByKey(*patch.Kind); !ok {
+				writeError(w, http.StatusBadRequest, "unknown device kind")
+				return
+			}
+		}
+		if patch.Estate != nil && !validEstate(*patch.Estate) {
+			writeError(w, http.StatusBadRequest, "estate must be KNG, MRT or SLG")
+			return
+		}
+		item, err := fs.UpdateDevice(r.Context(), id, patch)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "device not found")
+			return
+		}
+		if runtime != nil {
+			runtime.RefreshDevice(item)
+		}
+		writeJSON(w, http.StatusOK, item)
+	})
+
+	mux.HandleFunc("GET /api/devices/{id}/simulation", func(w http.ResponseWriter, r *http.Request) {
+		if !needRuntime(w) {
+			return
+		}
+		if id, ok := deviceID(w, r); ok {
+			writeJSON(w, http.StatusOK, runtime.State(id))
+		}
+	})
+
+	mux.HandleFunc("POST /api/devices/{id}/simulation", func(w http.ResponseWriter, r *http.Request) {
+		if !needRuntime(w) {
+			return
+		}
+		id, ok := deviceID(w, r)
+		if !ok {
 			return
 		}
 		var input SimulationControl
-		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
-			writeError(writer, http.StatusBadRequest, "invalid simulation payload")
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid simulation payload")
 			return
 		}
 		state, err := runtime.Apply(id, input)
 		if err != nil {
-			writeError(writer, http.StatusBadRequest, err.Error())
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		writeJSON(writer, http.StatusOK, state)
+		writeJSON(w, http.StatusOK, state)
 	})
-	mux.HandleFunc("POST /api/devices", func(writer http.ResponseWriter, request *http.Request) {
-		if store == nil {
-			writeError(writer, http.StatusServiceUnavailable, "PostgreSQL is not configured; set DATABASE_URL")
+
+	mux.HandleFunc("GET /api/devices/{id}/sensor-onboarding.zip", func(w http.ResponseWriter, r *http.Request) {
+		if !needStore(w) {
 			return
 		}
-		var input DeviceInput
-		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
-			writeError(writer, http.StatusBadRequest, "invalid device payload")
+		id, ok := deviceID(w, r)
+		if !ok {
 			return
 		}
-		input.Name, input.IMEI, input.Model = strings.TrimSpace(input.Name), strings.TrimSpace(input.IMEI), strings.TrimSpace(input.Model)
-		if input.Name == "" || input.IMEI == "" {
-			writeError(writer, http.StatusBadRequest, "name and imei are required")
-			return
-		}
-		if input.Model == "" {
-			input.Model = "Teltonika FMC920"
-		}
-		item, err := store.CreateDevice(request.Context(), input)
+		items, err := store.ListDevices(r.Context())
 		if err != nil {
-			writeError(writer, http.StatusInternalServerError, "create device")
+			writeError(w, http.StatusInternalServerError, "load devices")
 			return
 		}
-		writeJSON(writer, http.StatusCreated, item)
-	})
-	mux.HandleFunc("GET /api/devices/{id}/sensor-onboarding.zip", func(writer http.ResponseWriter, request *http.Request) {
-		if store == nil {
-			writeError(writer, http.StatusServiceUnavailable, "PostgreSQL is not configured; set DATABASE_URL")
-			return
-		}
-		var id int64
-		if _, err := fmtSscan(request.PathValue("id"), &id); err != nil || id < 1 {
-			writeError(writer, http.StatusBadRequest, "invalid device id")
-			return
-		}
-		items, err := store.ListDevices(request.Context())
-		if err != nil {
-			writeError(writer, http.StatusInternalServerError, "load devices")
-			return
-		}
-		var device *Device
-		for i := range items {
-			if items[i].ID == id {
-				device = &items[i]
-				break
+		for _, d := range items {
+			if d.ID == id {
+				writeOnboarding(w, []Device{d}, fmt.Sprintf("hexa-sensor-onboarding-%s.zip", safeKey(d.Name)))
+				return
 			}
 		}
-		if device == nil {
-			writeError(writer, http.StatusNotFound, "device not found")
-			return
-		}
-		payload, err := sensorOnboardingZIP(*device)
-		if err != nil {
-			writeError(writer, http.StatusInternalServerError, "build Sensor onboarding package")
-			return
-		}
-		filename := fmt.Sprintf("hexa-sensor-onboarding-%s.zip", safeKey(device.Name))
-		writer.Header().Set("Content-Type", "application/zip")
-		writer.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
-		writer.Header().Set("Cache-Control", "no-store")
-		writer.WriteHeader(http.StatusOK)
-		_, _ = writer.Write(payload)
+		writeError(w, http.StatusNotFound, "device not found")
 	})
-	mux.HandleFunc("POST /api/devices/{id}/telemetry", func(writer http.ResponseWriter, request *http.Request) {
-		if store == nil {
-			writeError(writer, http.StatusServiceUnavailable, "PostgreSQL is not configured; set DATABASE_URL")
+
+	mux.HandleFunc("POST /api/devices/{id}/telemetry", func(w http.ResponseWriter, r *http.Request) {
+		if !needStore(w) {
 			return
 		}
-		var id int64
-		if _, err := fmtSscan(request.PathValue("id"), &id); err != nil || id < 1 {
-			writeError(writer, http.StatusBadRequest, "invalid device id")
+		id, ok := deviceID(w, r)
+		if !ok {
 			return
 		}
 		var input TelemetryInput
-		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
-			writeError(writer, http.StatusBadRequest, "invalid telemetry payload")
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid telemetry payload")
 			return
 		}
 		if input.Status != "online" && input.Status != "offline" {
-			writeError(writer, http.StatusBadRequest, "status must be online or offline")
+			writeError(w, http.StatusBadRequest, "status must be online or offline")
 			return
 		}
 		if !validTelemetry(input) {
-			writeError(writer, http.StatusBadRequest, "telemetry values are outside supported ranges")
+			writeError(w, http.StatusBadRequest, "telemetry values are outside supported ranges")
 			return
 		}
-		item, err := store.UpdateTelemetry(request.Context(), id, input)
+		item, err := store.UpdateTelemetry(r.Context(), id, input)
 		if err != nil {
-			writeError(writer, http.StatusInternalServerError, "update telemetry")
+			writeError(w, http.StatusInternalServerError, "update telemetry")
 			return
 		}
-		if item.Status == "online" {
-			for _, forwarder := range forwarders {
-				if forwarder == nil {
-					continue
-				}
-				if err := forwarder.ForwardTelemetry(request.Context(), item); err != nil {
-					writeError(writer, http.StatusBadGateway, "forward telemetry: "+err.Error())
-					return
-				}
+		if item.Status == "online" && runtime != nil {
+			if err := runtime.Inject(r.Context(), item); err != nil {
+				writeError(w, http.StatusBadGateway, "forward telemetry: "+err.Error())
+				return
 			}
 		}
-		writeJSON(writer, http.StatusOK, item)
+		writeJSON(w, http.StatusOK, item)
 	})
-	mux.HandleFunc("DELETE /api/devices/{id}", func(writer http.ResponseWriter, request *http.Request) {
-		if store == nil {
-			writeError(writer, http.StatusServiceUnavailable, "PostgreSQL is not configured; set DATABASE_URL")
+
+	mux.HandleFunc("DELETE /api/devices/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if !needStore(w) {
 			return
 		}
-		var id int64
-		if _, err := fmtSscan(request.PathValue("id"), &id); err != nil || id < 1 {
-			writeError(writer, http.StatusBadRequest, "invalid device id")
+		id, ok := deviceID(w, r)
+		if !ok {
 			return
 		}
-		if err := store.DeleteDevice(request.Context(), id); err != nil {
-			writeError(writer, http.StatusInternalServerError, "delete device")
+		if err := store.DeleteDevice(r.Context(), id); err != nil {
+			writeError(w, http.StatusInternalServerError, "delete device")
 			return
 		}
-		writer.WriteHeader(http.StatusNoContent)
+		if runtime != nil {
+			runtime.RemoveDevice(id)
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
+
+	// ---- the fleet ---------------------------------------------------------------------------
+
+	mux.HandleFunc("GET /api/world", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/geo+json")
+		w.Header().Set("Cache-Control", "private, max-age=3600")
+		_, _ = w.Write(world.GeoJSON())
+	})
+
+	mux.HandleFunc("GET /api/catalog", func(w http.ResponseWriter, r *http.Request) {
+		type kindView struct {
+			Key       string   `json:"key"`
+			Name      string   `json:"name"`
+			Code      string   `json:"code"`
+			AssetType string   `json:"asset_type"`
+			Fields    []string `json:"fields"`
+		}
+		type scenarioView struct {
+			Name    string              `json:"name"`
+			Title   string              `json:"title"`
+			Summary string              `json:"summary"`
+			LengthS float64             `json:"length_s"`
+			Events  []ScenarioEventView `json:"events"`
+		}
+		var kinds []kindView
+		for _, k := range fleet.Kinds {
+			kinds = append(kinds, kindView{k.Key, k.Name, k.Code, k.AssetType, k.Fields})
+		}
+		var scenarios []scenarioView
+		for _, s := range scenario.Scenarios {
+			v := scenarioView{Name: s.Name, Title: s.Title, Summary: s.Summary, LengthS: s.Length.Seconds()}
+			for _, ev := range s.Events {
+				v.Events = append(v.Events, ScenarioEventView{AtS: ev.At.Seconds(), Type: ev.Type, Note: ev.Note})
+			}
+			scenarios = append(scenarios, v)
+		}
+		outputs := map[string]bool{}
+		for _, name := range fleet.Transports {
+			outputs[name] = runtime != nil && runtime.Configured(name)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"kinds": kinds, "behaviours": scenario.Catalog, "scenarios": scenarios, "estates": world.Estates, "outputs": outputs})
+	})
+
+	mux.HandleFunc("GET /api/fleet", func(w http.ResponseWriter, r *http.Request) {
+		if needRuntime(w) {
+			writeJSON(w, http.StatusOK, runtime.Fleet())
+		}
+	})
+
+	mux.HandleFunc("GET /api/fleet/sensor-onboarding.zip", func(w http.ResponseWriter, r *http.Request) {
+		if !needStore(w) {
+			return
+		}
+		items, err := store.ListDevices(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "load devices")
+			return
+		}
+		q := r.URL.Query()
+		var picked []Device
+		for _, d := range items {
+			if (q.Get("kind") == "" || d.Kind == q.Get("kind")) && (q.Get("estate") == "" || d.Estate == q.Get("estate")) && (q.Get("output") == "" || d.Output == q.Get("output")) {
+				picked = append(picked, d)
+			}
+		}
+		if len(picked) == 0 {
+			writeError(w, http.StatusNotFound, "no devices match")
+			return
+		}
+		writeOnboarding(w, picked, "hexa-sensor-onboarding-fleet.zip")
+	})
+
+	type targetBody struct {
+		Target scenario.Target `json:"target"`
+	}
+	mux.HandleFunc("POST /api/fleet/behaviours", func(w http.ResponseWriter, r *http.Request) {
+		if !needRuntime(w) {
+			return
+		}
+		var in struct {
+			Target    scenario.Target `json:"target"`
+			Type      string          `json:"type"`
+			Params    scenario.Params `json:"params"`
+			DelayS    float64         `json:"delay_s"`
+			DurationS float64         `json:"duration_s"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid behaviour payload")
+			return
+		}
+		if in.DelayS < 0 || in.DelayS > 86400 || in.DurationS < 0 || in.DurationS > 7*86400 || math.IsNaN(in.DelayS+in.DurationS) {
+			writeError(w, http.StatusBadRequest, "delay and duration are outside supported ranges")
+			return
+		}
+		created, err := runtime.Give(in.Target, in.Type, in.Params, time.Duration(in.DelayS*float64(time.Second)), time.Duration(in.DurationS*float64(time.Second)))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if created == nil {
+			created = []Behaviour{}
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"created": len(created), "items": created})
+	})
+
+	mux.HandleFunc("POST /api/fleet/behaviours/clear", func(w http.ResponseWriter, r *http.Request) {
+		if !needRuntime(w) {
+			return
+		}
+		var in targetBody
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid target")
+			return
+		}
+		n, err := runtime.ClearBehaviours(in.Target)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "clear behaviours")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"cleared": n})
+	})
+
+	mux.HandleFunc("POST /api/fleet/output", func(w http.ResponseWriter, r *http.Request) {
+		if !needRuntime(w) {
+			return
+		}
+		var in struct {
+			Target scenario.Target `json:"target"`
+			Output string          `json:"output"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid output payload")
+			return
+		}
+		n, err := runtime.SetOutputs(in.Target, in.Output)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"updated": n})
+	})
+
+	mux.HandleFunc("POST /api/fleet/run", func(w http.ResponseWriter, r *http.Request) {
+		if !needRuntime(w) {
+			return
+		}
+		var in struct {
+			Target scenario.Target `json:"target"`
+			Action string          `json:"action"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid run payload")
+			return
+		}
+		n, err := runtime.Run(in.Target, in.Action)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"updated": n})
+	})
+
+	mux.HandleFunc("POST /api/fleet/reset", func(w http.ResponseWriter, r *http.Request) {
+		if !needRuntime(w) {
+			return
+		}
+		if err := runtime.Reset(); err != nil {
+			writeError(w, http.StatusInternalServerError, "reset the fleet")
+			return
+		}
+		writeJSON(w, http.StatusOK, runtime.Fleet())
+	})
+
+	mux.HandleFunc("POST /api/scenarios/{name}/start", func(w http.ResponseWriter, r *http.Request) {
+		if !needRuntime(w) {
+			return
+		}
+		if err := runtime.StartScenario(r.PathValue("name")); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, runtime.Fleet().Scenario)
+	})
+
+	mux.HandleFunc("POST /api/scenarios/stop", func(w http.ResponseWriter, r *http.Request) {
+		if !needRuntime(w) {
+			return
+		}
+		if err := runtime.StopScenario(); err != nil {
+			writeError(w, http.StatusInternalServerError, "stop the scenario")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
 	if strings.TrimSpace(webRoot) != "" {
 		root := filepath.Clean(webRoot)
 		assets := http.FileServer(http.Dir(root))
 		mux.Handle("GET /assets/", assets)
-		mux.HandleFunc("GET /", func(writer http.ResponseWriter, request *http.Request) {
-			if strings.HasPrefix(request.URL.Path, "/api/") || request.URL.Path == "/healthz" {
-				http.NotFound(writer, request)
+		mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/healthz" {
+				http.NotFound(w, r)
 				return
 			}
 			index := filepath.Join(root, "index.html")
 			if _, err := os.Stat(index); err != nil {
-				http.NotFound(writer, request)
+				http.NotFound(w, r)
 				return
 			}
-			http.ServeFile(writer, request, index)
+			http.ServeFile(w, r, index)
 		})
 	}
 	return mux
+}
+
+func validEstate(code string) bool {
+	for _, e := range world.Estates {
+		if e.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 func validTelemetry(input TelemetryInput) bool {
@@ -371,69 +611,4 @@ func safeKey(value string) string {
 		return "device"
 	}
 	return key
-}
-
-func sensorProfileKey(model string) string {
-	key := safeKey(model)
-	if key == "teltonika-fmc920" {
-		return "teltonika-fmc920-test"
-	}
-	return key
-}
-
-func sensorAssetCode(device Device) string {
-	code := strings.ToUpper(safeKey(device.Name))
-	if code == "DEVICE" {
-		return fmt.Sprintf("SIM-%d", device.ID)
-	}
-	return code
-}
-
-func csvBytes(header, row []string) ([]byte, error) {
-	var buffer bytes.Buffer
-	writer := csv.NewWriter(&buffer)
-	if err := writer.Write(header); err != nil {
-		return nil, err
-	}
-	if err := writer.Write(row); err != nil {
-		return nil, err
-	}
-	writer.Flush()
-	if err := writer.Error(); err != nil {
-		return nil, err
-	}
-	return buffer.Bytes(), nil
-}
-
-func sensorOnboardingZIP(device Device) ([]byte, error) {
-	assetCode := sensorAssetCode(device)
-	files := []struct {
-		name   string
-		header []string
-		row    []string
-	}{
-		{"01_estates.csv", []string{"code", "name", "parent_code"}, []string{"DEMO-ESTATE", "Demo Estate", ""}},
-		{"02_devices.csv", []string{"hardware_id", "profile_key", "serial", "firmware", "sim_iccid", "sim_msisdn", "sim_operator", "external_ids", "labels"}, []string{device.IMEI, sensorProfileKey(device.Model), "", "", "", "", "", "", ""}},
-		{"03_assets.csv", []string{"asset_code", "asset_type", "name", "plate_number", "estate_code", "labels"}, []string{assetCode, "Truck", device.Name, "", "DEMO-ESTATE", ""}},
-		{"04_assignments.csv", []string{"hardware_id", "asset_code", "valid_from", "valid_to"}, []string{device.IMEI, assetCode, time.Now().UTC().Format(time.RFC3339), ""}},
-	}
-	var buffer bytes.Buffer
-	archive := zip.NewWriter(&buffer)
-	for _, file := range files {
-		data, err := csvBytes(file.header, file.row)
-		if err != nil {
-			return nil, err
-		}
-		entry, err := archive.Create(file.name)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := entry.Write(data); err != nil {
-			return nil, err
-		}
-	}
-	if err := archive.Close(); err != nil {
-		return nil, err
-	}
-	return buffer.Bytes(), nil
 }

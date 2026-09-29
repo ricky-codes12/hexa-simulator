@@ -1,34 +1,43 @@
 # Development
 
-Run ./scripts/setup.sh once after creation, then .hexa/project dev start for supervised API + Vite development. Direct go run ./cmd/api serve and (cd web && bun run dev) remain available; Hexa.Build does not hide the normal toolchains.
+Run ./scripts/setup.sh once after creation, then .hexa/project dev start for supervised API + Vite
+development. Direct go run ./cmd/api serve and (cd web && bun run dev) remain available;
+Hexa.Build does not hide the normal toolchains.
 
-Persistence is optional until configured. Set DATABASE_URL to a local PostgreSQL instance and run ./scripts/migrate.sh explicitly. Never commit that URL if it contains credentials. Setup and Runtime build never mutate a database implicitly.
+## Dev plane
 
+`.hexa/project dev start` builds the API, starts it and Vite as transient user-systemd units, and
+passes every simulator setting in the environment (`SIM_*`, `TELTONIKA_*`, `DATABASE_URL`) to the
+API through a mode-0600 file in the project state directory. The ports default to 8080 (API) and
+5173 (web), which collide with hexa-ai's Dev plane; set `SIM_DEV_API_PORT` and `SIM_DEV_WEB_PORT`
+to move them. Keep the settings in a protected file outside the repository and load it before
+`dev start`:
 
-## Teltonika Gateway output
+~~~bash
+set -a; . ~/somewhere-safe/hexa-simulator-dev.env; set +a
+.hexa/project dev start
+~~~
 
-The simulator remains standalone by default. To forward online telemetry to a Teltonika-compatible TCP Gateway during development, set `TELTONIKA_GATEWAY_ADDR=host:port`. `TELTONIKA_GATEWAY_TIMEOUT` accepts a Go duration such as `5s` and defaults to five seconds. Do not commit real environment-specific addresses or credentials. The virtual device IMEI must be a 15-digit Teltonika-compatible IMEI when gateway forwarding is enabled.
+## Database
 
+Persistence needs PostgreSQL. Set DATABASE_URL to a disposable local database and run
+./scripts/migrate.sh explicitly (it needs `psql`). Migrations are idempotent and re-applied in
+order; `004_fleet.sql` adds the fleet columns, behaviours and the fleet clock, and removes the old
+350-truck grid whose IMEIs collided with Hexa.Sensor's own fleet. Startup then seeds the fleet from
+`SIM_DEMO_FLEET` and `SIM_SEED`, keeping operator-created devices and operator changes to seeded
+ones (such as their output).
 
-## HEXA.SENSOR integration
+## The fleet and Hexa.Sensor
 
-For HTTP Push development, configure `SIM_SENSOR_PUSH_URL` and `SIM_SENSOR_PUSH_KEY` together in the local/protected environment. `SIM_SENSOR_PUSH_URL` is the full Hexa.Sensor connector endpoint (for example a local `/ingest/v1/<instance>` URL); `SIM_SENSOR_PUSH_KEY` is the connector ingest key and is sent as a Bearer credential. `SIM_SENSOR_PUSH_TIMEOUT` is optional and defaults to `5s`. Never commit the real key. These three names are declared in `.hexa/project.yaml` so Hexa.Build may pass protected values into the project adapter; the adapter writes development push credentials only to its mode-0600 project-state environment file and Runtime continues to consume them from `RUNTIME_ENV_FILE`.
+- The world is Hexa.Sensor's (`internal/world`). Change it only to follow Sensor's seed-demo set,
+  and bump `world.Revision` with it.
+- A new kind of device is a `fleet.Kind` (its fields, asset type, default output) plus an
+  itinerary builder in `internal/fleet/plans.go`. Keep its day inside the operating area and out of
+  the conservation zone; `TestItinerariesRaiseNoAlarmsByThemselves` checks every seeded unit.
+- A new behaviour is a `scenario.Spec` plus its effect in `SimulationRuntime.advance` (motion) or
+  `filter` (what is sent). Write it against records, not GPS, when it can be.
+- Wire a Sensor Dev plane with `bin/api sensor-onboard --sensor http://127.0.0.1:19180 --sources …`
+  (docs/DEMO_FLEET.md §2). It signs in as a tenant administrator; `SENSOR_TOTP_SECRET` lets a
+  Dev-only account run it unattended.
 
-The canonical local development endpoints are `http://127.0.0.1:5173` for the Vite UI and `http://127.0.0.1:8080` for the Go API. Vite proxies `/api` and `/healthz` to that API. When debugging UI/API consistency, test `127.0.0.1:8080`; another listening port is a different process and is not authoritative for `.hexa/project dev`.
-
-With these values absent, no HTTP Push forwarder is enabled.
-
-## Demo fleet and protocol status
-
-Migration `003_demo_fleet.sql` and API startup provisioning fill the database to a target of 350 devices using deterministic Teltonika FMC920 virtual trucks with unique 15-digit IMEIs and forestry-area starting positions. Existing operator-created devices count toward the 350-device target and are never deleted or rewritten. Startup provisioning is transactionally serialized and idempotent, so an already-populated Runtime database is repaired on activation without requiring an implicit schema migration. Device discovery remains server-side, capped at 100 results per request; the UI uses 50-row search pages rather than rendering the whole fleet.
-
-The server-owned simulation runtime reports configured output paths per selected device. `http-push`, `mqtt`, and `teltonika-direct` are `ready` before the first tick, `sending` after a successful forward, and `error` after a failed forward. These are runtime observations, not synthetic frontend health indicators. Unconfigured outputs are shown as such.
-
-
-## Concurrent demo fleet runtime
-
-After demo-fleet provisioning, API startup starts every persisted device in the server-owned simulation runtime. The default 350-device fleet therefore remains live without an open browser. Initial device ticks are deterministically phased across the three-second interval rather than emitted as one startup burst. Manual pause/stop/start controls remain per-device and do not create duplicate loops. Protocol outputs continue to follow protected Runtime configuration.
-
-### Fleet-scale MQTT and Teltonika Direct
-
-Configured outputs are dispatched asynchronously from the simulation clock through bounded worker queues. Do not raise queue/worker limits to mask an unhealthy downstream service; inspect Protocol Outputs and the target service instead. MQTT emits the canonical Hexa.Sensor telemetry envelope on the configured topic. Teltonika Direct keeps independent persistent sessions per IMEI so the demo fleet can progress concurrently. Runtime addresses remain protected external configuration; the repository deliberately does not hard-code a broker or Sensor listener address.
+Never commit a database URL with credentials, a broker password or a Sensor ingest key.
