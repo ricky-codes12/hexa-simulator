@@ -45,21 +45,96 @@ type SimulationState struct {
 	Outputs         map[string]OutputState `json:"outputs,omitempty"`
 }
 
-type SimulationRuntime struct {
-	ctx        context.Context
-	store      DeviceStore
-	forwarders []TelemetryForwarder
-	interval   time.Duration
-	mu         sync.Mutex
-	states     map[int64]*SimulationState
-	cancels    map[int64]context.CancelFunc
+type outputTask struct {
+	deviceID int64
+	device   Device
 }
+
+type outputDispatcher struct {
+	name      string
+	forwarder TelemetryForwarder
+	queue     chan outputTask
+}
+
+type SimulationRuntime struct {
+	ctx         context.Context
+	store       DeviceStore
+	forwarders  []TelemetryForwarder
+	dispatchers []*outputDispatcher
+	interval    time.Duration
+	mu          sync.Mutex
+	states      map[int64]*SimulationState
+	cancels     map[int64]context.CancelFunc
+}
+
+const (
+	outputWorkers   = 16
+	outputQueueSize = 700
+)
 
 func NewSimulationRuntime(ctx context.Context, store DeviceStore, interval time.Duration, forwarders ...TelemetryForwarder) *SimulationRuntime {
 	if interval <= 0 {
 		interval = 3 * time.Second
 	}
-	return &SimulationRuntime{ctx: ctx, store: store, forwarders: forwarders, interval: interval, states: map[int64]*SimulationState{}, cancels: map[int64]context.CancelFunc{}}
+	r := &SimulationRuntime{ctx: ctx, store: store, forwarders: forwarders, interval: interval, states: map[int64]*SimulationState{}, cancels: map[int64]context.CancelFunc{}}
+	for _, f := range forwarders {
+		name := "output"
+		if named, ok := f.(NamedTelemetryForwarder); ok {
+			name = named.OutputName()
+		}
+		d := &outputDispatcher{name: name, forwarder: f, queue: make(chan outputTask, outputQueueSize)}
+		r.dispatchers = append(r.dispatchers, d)
+		for i := 0; i < outputWorkers; i++ {
+			go r.outputWorker(d)
+		}
+	}
+	return r
+}
+
+func (r *SimulationRuntime) outputWorker(d *outputDispatcher) {
+	for {
+		select {
+		case <-r.ctx.Done():
+			return
+		case task := <-d.queue:
+			err := d.forwarder.ForwardTelemetry(r.ctx, task.device)
+			r.recordOutput(task.deviceID, d.name, task.device.UpdatedAt, err)
+		}
+	}
+}
+
+func (r *SimulationRuntime) enqueueOutput(d *outputDispatcher, task outputTask) {
+	select {
+	case d.queue <- task:
+	default:
+		r.recordOutput(task.deviceID, d.name, time.Time{}, fmt.Errorf("output queue full"))
+	}
+}
+
+func (r *SimulationRuntime) recordOutput(deviceID int64, name string, at time.Time, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s := r.states[deviceID]
+	if s == nil {
+		return
+	}
+	if s.Outputs == nil {
+		s.Outputs = map[string]OutputState{}
+	}
+	result := OutputState{Configured: true, Status: "sending"}
+	if err != nil {
+		result.Status = "error"
+		result.LastError = err.Error()
+		s.LastError = fmt.Sprintf("%s: %v", name, err)
+	} else {
+		result.LastOK = at
+	}
+	s.Outputs[name] = result
+}
+
+type fleetInitialResult struct {
+	id  int64
+	err error
 }
 
 // StartFleet restores the server-owned demo runtime after process startup. It
@@ -76,6 +151,8 @@ func (r *SimulationRuntime) StartFleet() (int, error) {
 	if len(items) == 0 {
 		return 0, nil
 	}
+
+	ready := make(chan fleetInitialResult, len(items))
 
 	r.mu.Lock()
 	started := 0
@@ -99,24 +176,44 @@ func (r *SimulationRuntime) StartFleet() (int, error) {
 		ctx, cancel := context.WithCancel(r.ctx)
 		r.cancels[d.ID] = cancel
 		delay := time.Duration(int64(r.interval) * int64(i) / int64(len(items)))
-		go r.loopPhased(ctx, d.ID, delay)
+		go r.loopPhased(ctx, d.ID, delay, ready)
 		started++
 	}
 	r.mu.Unlock()
+
+	// Startup readiness is a completion barrier, not a scheduler guess. Every
+	// newly-created worker must finish its phased initial persistence tick before
+	// StartFleet reports the fleet as ready. This keeps regular ticks phased while
+	// making Runtime activation deterministic for the full fleet.
+	for i := 0; i < started; i++ {
+		select {
+		case <-r.ctx.Done():
+			return started, r.ctx.Err()
+		case result := <-ready:
+			if result.err != nil {
+				return started, fmt.Errorf("initial telemetry for device %d: %w", result.id, result.err)
+			}
+		}
+	}
 	return started, nil
 }
 
-func (r *SimulationRuntime) loopPhased(ctx context.Context, id int64, delay time.Duration) {
+func (r *SimulationRuntime) loopPhased(ctx context.Context, id int64, delay time.Duration, ready chan<- fleetInitialResult) {
 	if delay > 0 {
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
 		select {
 		case <-ctx.Done():
+			ready <- fleetInitialResult{id: id, err: ctx.Err()}
 			return
 		case <-timer.C:
 		}
 	}
-	r.tick(id)
+	err := r.tickOnce(id)
+	ready <- fleetInitialResult{id: id, err: err}
+	if err != nil {
+		return
+	}
 	r.loop(ctx, id)
 }
 
@@ -228,19 +325,19 @@ func (r *SimulationRuntime) loop(ctx context.Context, id int64) {
 	}
 }
 
-func (r *SimulationRuntime) tick(id int64) {
+func (r *SimulationRuntime) tickOnce(id int64) error {
 	r.mu.Lock()
 	s := r.states[id]
 	if s == nil || !s.Running || s.Paused {
 		r.mu.Unlock()
-		return
+		return nil
 	}
 	state := *s
 	r.mu.Unlock()
 	d, err := r.device(id)
 	if err != nil {
 		r.setError(id, err)
-		return
+		return err
 	}
 	lat, lon, heading := d.Latitude, d.Longitude, state.Heading
 	if lat == 0 && lon == 0 {
@@ -264,39 +361,25 @@ func (r *SimulationRuntime) tick(id int64) {
 	updated, err := r.store.UpdateTelemetry(r.ctx, id, TelemetryInput{Status: "online", Latitude: lat, Longitude: lon, Speed: state.Speed, Heading: heading, Ignition: true})
 	if err != nil {
 		r.setError(id, err)
-		return
-	}
-	var last error
-	results := map[string]OutputState{}
-	for _, f := range r.forwarders {
-		name := "output"
-		if named, ok := f.(NamedTelemetryForwarder); ok {
-			name = named.OutputName()
-		}
-		result := OutputState{Configured: true, Status: "sending"}
-		if err := f.ForwardTelemetry(r.ctx, updated); err != nil {
-			last = err
-			result.Status = "error"
-			result.LastError = err.Error()
-		} else {
-			result.LastOK = updated.UpdatedAt
-		}
-		results[name] = result
+		return err
 	}
 	r.mu.Lock()
 	if current := r.states[id]; current != nil {
 		current.Heading = heading
 		current.Speed = state.Speed
 		current.LastTick = updated.UpdatedAt
-		if last != nil {
-			current.LastError = last.Error()
-		} else {
-			current.LastError = ""
-		}
-		current.Outputs = results
 	}
 	r.mu.Unlock()
+	for _, d := range r.dispatchers {
+		r.enqueueOutput(d, outputTask{deviceID: id, device: updated})
+	}
+	return nil
 }
+
+func (r *SimulationRuntime) tick(id int64) {
+	_ = r.tickOnce(id)
+}
+
 func (r *SimulationRuntime) device(id int64) (Device, error) {
 	if lookup, ok := r.store.(DeviceLookupStore); ok {
 		return lookup.GetDevice(r.ctx, id)

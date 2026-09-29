@@ -16,7 +16,12 @@ type Client struct {
 	Timeout time.Duration
 	Codec   string
 	mu      sync.Mutex
-	conns   map[string]net.Conn
+	conns   map[string]*deviceConn
+}
+
+type deviceConn struct {
+	mu   sync.Mutex
+	conn net.Conn
 }
 type Telemetry struct {
 	IMEI                                string
@@ -27,39 +32,54 @@ type Telemetry struct {
 
 func (c *Client) Close() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, conn := range c.conns {
-		_ = conn.Close()
-	}
+	entries := c.conns
 	c.conns = nil
+	c.mu.Unlock()
+	for _, entry := range entries {
+		entry.mu.Lock()
+		if entry.conn != nil {
+			_ = entry.conn.Close()
+			entry.conn = nil
+		}
+		entry.mu.Unlock()
+	}
+}
+func (c *Client) entry(imei string) *deviceConn {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conns == nil {
+		c.conns = map[string]*deviceConn{}
+	}
+	entry := c.conns[imei]
+	if entry == nil {
+		entry = &deviceConn{}
+		c.conns[imei] = entry
+	}
+	return entry
 }
 func (c *Client) Send(ctx context.Context, t Telemetry) error {
 	if c.Address == "" {
 		return nil
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.conns == nil {
-		c.conns = map[string]net.Conn{}
-	}
-	conn := c.conns[t.IMEI]
-	if conn == nil {
-		var err error
-		conn, err = c.connect(ctx, t.IMEI)
+	entry := c.entry(t.IMEI)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.conn == nil {
+		conn, err := c.connect(ctx, t.IMEI)
 		if err != nil {
 			return err
 		}
-		c.conns[t.IMEI] = conn
+		entry.conn = conn
 	}
-	if err := c.send(conn, t); err != nil {
-		_ = conn.Close()
-		delete(c.conns, t.IMEI)
-		conn2, e := c.connect(ctx, t.IMEI)
-		if e != nil {
-			return err
+	if err := c.send(entry.conn, t); err != nil {
+		_ = entry.conn.Close()
+		entry.conn = nil
+		conn, reconnectErr := c.connect(ctx, t.IMEI)
+		if reconnectErr != nil {
+			return fmt.Errorf("send failed: %v; reconnect failed: %w", err, reconnectErr)
 		}
-		c.conns[t.IMEI] = conn2
-		return c.send(conn2, t)
+		entry.conn = conn
+		return c.send(entry.conn, t)
 	}
 	return nil
 }
