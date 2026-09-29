@@ -53,6 +53,12 @@ func serve() {
 			os.Exit(1)
 		}
 		defer postgres.Close()
+		authPostgres, err := postgresstore.Open(ctx, databaseURL)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "authentication database: %v\n", err)
+			os.Exit(1)
+		}
+		defer authPostgres.Close()
 		if total, err := postgres.EnsureDemoFleet(ctx, 350); err != nil {
 			fmt.Fprintf(os.Stderr, "demo fleet: %v\n", err)
 			os.Exit(1)
@@ -60,7 +66,7 @@ func serve() {
 			fmt.Printf("demo fleet: %d devices ready\n", total)
 		}
 		store = postgres
-		authStore = postgres
+		authStore = authPostgres
 		adminPassword := os.Getenv("SIM_ADMIN_PASSWORD")
 		if len(adminPassword) < 12 {
 			fmt.Fprintln(os.Stderr, "SIM_ADMIN_PASSWORD must be set to at least 12 characters")
