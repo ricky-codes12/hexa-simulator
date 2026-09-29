@@ -169,8 +169,19 @@ func SecureHandlerWithRuntime(revision string, store DeviceStore, auth AuthStore
 			writeError(w, http.StatusConflict, "MFA is already enabled")
 			return
 		}
-		secret := randomBase32(20)
-		_ = auth.UpdateMFA(r.Context(), a.User.ID, encryptSecret(secret), false)
+		u, err := auth.UserByID(r.Context(), a.User.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "load MFA setup")
+			return
+		}
+		secret := decryptSecret(u.MFASecret)
+		if secret == "" {
+			secret = randomBase32(20)
+			if err := auth.UpdateMFA(r.Context(), a.User.ID, encryptSecret(secret), false); err != nil {
+				writeError(w, http.StatusInternalServerError, "save MFA setup")
+				return
+			}
+		}
 		writeJSON(w, 200, map[string]any{"secret": secret, "otpauth_uri": fmt.Sprintf("otpauth://totp/Hexa.Simulator:%s?secret=%s&issuer=Hexa.Simulator", a.User.Email, secret)})
 	})
 	protected.HandleFunc("POST /api/security/mfa/enable", func(w http.ResponseWriter, r *http.Request) {
