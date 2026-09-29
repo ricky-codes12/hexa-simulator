@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -51,4 +52,49 @@ func TestSimulationRuntimeReportsNamedOutputState(t *testing.T) {
 		t.Fatalf("mqtt output=%+v", out)
 	}
 	_, _ = r.Apply(7, SimulationControl{Action: "stop"})
+}
+
+func TestStartFleetRunsEveryDeviceWithoutBrowser(t *testing.T) {
+	items := make([]Device, 350)
+	for i := range items {
+		items[i] = Device{
+			ID:        int64(i + 1),
+			Name:      fmt.Sprintf("Truck %03d", i+1),
+			IMEI:      fmt.Sprintf("35630704%07d", 2441001+i),
+			Latitude:  -3.02 + float64(i%14)*0.0055,
+			Longitude: 104.715 + float64(i%25)*0.0068,
+			Heading:   float64((i * 47) % 360),
+			UpdatedAt: time.Now(),
+		}
+	}
+	s := &fakeStore{items: items}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := NewSimulationRuntime(ctx, s, 70*time.Millisecond)
+	started, err := r.StartFleet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started != 350 {
+		t.Fatalf("started=%d want 350", started)
+	}
+	if again, err := r.StartFleet(); err != nil || again != 0 {
+		t.Fatalf("second StartFleet started=%d err=%v", again, err)
+	}
+	for _, d := range items {
+		state := r.State(d.ID)
+		if !state.Running || state.Paused {
+			t.Fatalf("device %d state=%+v", d.ID, state)
+		}
+	}
+	time.Sleep(170 * time.Millisecond)
+	online := 0
+	for _, d := range s.items {
+		if d.Status == "online" && !d.UpdatedAt.IsZero() {
+			online++
+		}
+	}
+	if online != 350 {
+		t.Fatalf("online=%d want 350", online)
+	}
 }

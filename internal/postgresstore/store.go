@@ -99,6 +99,12 @@ func (s *Store) Ping(ctx context.Context) error {
 	}
 	return nil
 }
+func (s *Store) GetDevice(ctx context.Context, id int64) (httpapi.Device, error) {
+	var d httpapi.Device
+	err := s.db.QueryRowContext(ctx, `SELECT id,name,imei,model,status,latitude,longitude,speed,heading,ignition,updated_at,created_at FROM devices WHERE id=$1`, id).Scan(&d.ID, &d.Name, &d.IMEI, &d.Model, &d.Status, &d.Latitude, &d.Longitude, &d.Speed, &d.Heading, &d.Ignition, &d.UpdatedAt, &d.CreatedAt)
+	return d, err
+}
+
 func (s *Store) ListDevices(ctx context.Context) ([]httpapi.Device, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id,name,imei,model,status,latitude,longitude,speed,heading,ignition,updated_at,created_at FROM devices ORDER BY id`)
 	if err != nil {

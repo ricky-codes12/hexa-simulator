@@ -62,6 +62,64 @@ func NewSimulationRuntime(ctx context.Context, store DeviceStore, interval time.
 	return &SimulationRuntime{ctx: ctx, store: store, forwarders: forwarders, interval: interval, states: map[int64]*SimulationState{}, cancels: map[int64]context.CancelFunc{}}
 }
 
+// StartFleet restores the server-owned demo runtime after process startup. It
+// starts every persisted device exactly once without going through the HTTP
+// control path, so a Runtime activation immediately owns all fleet clocks even
+// when no browser is open. Initial ticks are evenly phased across one interval
+// to avoid a 350-device thundering herd against PostgreSQL and configured
+// protocol outputs.
+func (r *SimulationRuntime) StartFleet() (int, error) {
+	items, err := r.store.ListDevices(r.ctx)
+	if err != nil {
+		return 0, err
+	}
+	if len(items) == 0 {
+		return 0, nil
+	}
+
+	r.mu.Lock()
+	started := 0
+	for i := range items {
+		d := items[i]
+		s := r.states[d.ID]
+		if s == nil {
+			speed := d.Speed
+			if speed <= 0 {
+				speed = 40
+			}
+			s = &SimulationState{DeviceID: d.ID, Running: true, Mode: "auto", Speed: speed, Heading: d.Heading, Outputs: r.configuredOutputs()}
+			r.states[d.ID] = s
+		} else {
+			s.Running = true
+			s.Paused = false
+		}
+		if _, exists := r.cancels[d.ID]; exists {
+			continue
+		}
+		ctx, cancel := context.WithCancel(r.ctx)
+		r.cancels[d.ID] = cancel
+		delay := time.Duration(int64(r.interval) * int64(i) / int64(len(items)))
+		go r.loopPhased(ctx, d.ID, delay)
+		started++
+	}
+	r.mu.Unlock()
+	return started, nil
+}
+
+func (r *SimulationRuntime) loopPhased(ctx context.Context, id int64, delay time.Duration) {
+	if delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+	}
+	r.tick(id)
+	r.loop(ctx, id)
+}
+
 func (r *SimulationRuntime) configuredOutputs() map[string]OutputState {
 	out := map[string]OutputState{}
 	for _, f := range r.forwarders {
@@ -92,20 +150,9 @@ func (r *SimulationRuntime) State(id int64) SimulationState {
 }
 
 func (r *SimulationRuntime) Apply(id int64, in SimulationControl) (SimulationState, error) {
-	items, err := r.store.ListDevices(r.ctx)
+	d, err := r.device(id)
 	if err != nil {
 		return SimulationState{}, err
-	}
-	var d *Device
-	for i := range items {
-		if items[i].ID == id {
-			x := items[i]
-			d = &x
-			break
-		}
-	}
-	if d == nil {
-		return SimulationState{}, fmt.Errorf("device not found")
 	}
 	r.mu.Lock()
 	s := r.states[id]
@@ -190,20 +237,9 @@ func (r *SimulationRuntime) tick(id int64) {
 	}
 	state := *s
 	r.mu.Unlock()
-	items, err := r.store.ListDevices(r.ctx)
+	d, err := r.device(id)
 	if err != nil {
 		r.setError(id, err)
-		return
-	}
-	var d *Device
-	for i := range items {
-		if items[i].ID == id {
-			x := items[i]
-			d = &x
-			break
-		}
-	}
-	if d == nil {
 		return
 	}
 	lat, lon, heading := d.Latitude, d.Longitude, state.Heading
@@ -261,6 +297,22 @@ func (r *SimulationRuntime) tick(id int64) {
 	}
 	r.mu.Unlock()
 }
+func (r *SimulationRuntime) device(id int64) (Device, error) {
+	if lookup, ok := r.store.(DeviceLookupStore); ok {
+		return lookup.GetDevice(r.ctx, id)
+	}
+	items, err := r.store.ListDevices(r.ctx)
+	if err != nil {
+		return Device{}, err
+	}
+	for i := range items {
+		if items[i].ID == id {
+			return items[i], nil
+		}
+	}
+	return Device{}, fmt.Errorf("device not found")
+}
+
 func (r *SimulationRuntime) setError(id int64, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

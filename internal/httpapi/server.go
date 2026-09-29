@@ -54,6 +54,10 @@ type DeviceSearchStore interface {
 	SearchDevices(context.Context, string, int, int) ([]Device, int, error)
 }
 
+type DeviceLookupStore interface {
+	GetDevice(context.Context, int64) (Device, error)
+}
+
 type DeviceStore interface {
 	Ping(context.Context) error
 	ListDevices(context.Context) ([]Device, error)

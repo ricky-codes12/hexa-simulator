@@ -100,6 +100,12 @@ func serve() {
 	var runtime *apphttp.SimulationRuntime
 	if store != nil {
 		runtime = apphttp.NewSimulationRuntime(ctx, store, 3*time.Second, forwarders...)
+		started, err := runtime.StartFleet()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "simulation fleet runtime: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("simulation fleet runtime: %d devices running\n", started)
 	}
 	server := &http.Server{
 		Addr:              address,
