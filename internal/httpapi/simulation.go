@@ -45,6 +45,18 @@ type SimulationState struct {
 	Outputs         map[string]OutputState `json:"outputs,omitempty"`
 }
 
+type TransmissionLog struct {
+	Timestamp time.Time `json:"timestamp"`
+	Output    string    `json:"output"`
+	Status    string    `json:"status"`
+	LatencyMS int64     `json:"latency_ms"`
+	Latitude  float64   `json:"latitude"`
+	Longitude float64   `json:"longitude"`
+	Speed     float64   `json:"speed"`
+	Heading   float64   `json:"heading"`
+	Error     string    `json:"error,omitempty"`
+}
+
 type outputTask struct {
 	deviceID int64
 	device   Device
@@ -65,6 +77,7 @@ type SimulationRuntime struct {
 	mu          sync.Mutex
 	states      map[int64]*SimulationState
 	cancels     map[int64]context.CancelFunc
+	logs        map[int64][]TransmissionLog
 }
 
 const (
@@ -76,7 +89,7 @@ func NewSimulationRuntime(ctx context.Context, store DeviceStore, interval time.
 	if interval <= 0 {
 		interval = 3 * time.Second
 	}
-	r := &SimulationRuntime{ctx: ctx, store: store, forwarders: forwarders, interval: interval, states: map[int64]*SimulationState{}, cancels: map[int64]context.CancelFunc{}}
+	r := &SimulationRuntime{ctx: ctx, store: store, forwarders: forwarders, interval: interval, states: map[int64]*SimulationState{}, cancels: map[int64]context.CancelFunc{}, logs: map[int64][]TransmissionLog{}}
 	for _, f := range forwarders {
 		name := "output"
 		if named, ok := f.(NamedTelemetryForwarder); ok {
@@ -97,8 +110,9 @@ func (r *SimulationRuntime) outputWorker(d *outputDispatcher) {
 		case <-r.ctx.Done():
 			return
 		case task := <-d.queue:
+			started := time.Now()
 			err := d.forwarder.ForwardTelemetry(r.ctx, task.device)
-			r.recordOutput(task.deviceID, d.name, task.device.UpdatedAt, err)
+			r.recordOutput(task.deviceID, d.name, task.device.UpdatedAt, time.Since(started), task.device, err)
 		}
 	}
 }
@@ -107,11 +121,11 @@ func (r *SimulationRuntime) enqueueOutput(d *outputDispatcher, task outputTask) 
 	select {
 	case d.queue <- task:
 	default:
-		r.recordOutput(task.deviceID, d.name, time.Time{}, fmt.Errorf("output queue full"))
+		r.recordOutput(task.deviceID, d.name, time.Time{}, 0, task.device, fmt.Errorf("output queue full"))
 	}
 }
 
-func (r *SimulationRuntime) recordOutput(deviceID int64, name string, at time.Time, err error) {
+func (r *SimulationRuntime) recordOutput(deviceID int64, name string, at time.Time, latency time.Duration, device Device, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s := r.states[deviceID]
@@ -130,6 +144,39 @@ func (r *SimulationRuntime) recordOutput(deviceID int64, name string, at time.Ti
 		result.LastOK = at
 	}
 	s.Outputs[name] = result
+	status := "success"
+	errText := ""
+	if err != nil {
+		status = "error"
+		errText = err.Error()
+	}
+	entry := TransmissionLog{Timestamp: time.Now().UTC(), Output: name, Status: status, LatencyMS: latency.Milliseconds(), Latitude: device.Latitude, Longitude: device.Longitude, Speed: device.Speed, Heading: device.Heading, Error: errText}
+	entries := append([]TransmissionLog{entry}, r.logs[deviceID]...)
+	if len(entries) > 100 {
+		entries = entries[:100]
+	}
+	r.logs[deviceID] = entries
+}
+
+func (r *SimulationRuntime) TransmissionLogs(deviceID int64, limit int) []TransmissionLog {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entries := r.logs[deviceID]
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	if len(entries) < limit {
+		limit = len(entries)
+	}
+	out := make([]TransmissionLog, limit)
+	copy(out, entries[:limit])
+	return out
+}
+
+func (r *SimulationRuntime) ClearTransmissionLogs(deviceID int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.logs, deviceID)
 }
 
 type fleetInitialResult struct {

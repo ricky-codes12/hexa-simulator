@@ -74,3 +74,7 @@ The server-owned simulation clock is intentionally isolated from downstream prot
 MQTT publishes the canonical `hexa.sensor/telemetry/v1` envelope expected by Hexa.Sensor: `device.hardware_id`, `device_time`, normalized `position` fields (`fix_valid`, `lat`, `lon`, `speed_kmh`, `heading_deg`), and ignition/movement attributes. QoS 1 acknowledgement remains required.
 
 Teltonika Direct keeps one persistent TCP session per IMEI and synchronizes only that device session. Different virtual devices may therefore connect/send concurrently; a slow or reconnecting tracker no longer serializes every other IMEI behind a process-wide network lock. Codec 8/8E handshake, CRC and one-record AVL acknowledgement requirements remain unchanged.
+
+## Demo transmission observability
+
+The server-owned runtime keeps a bounded, in-memory transmission history for each virtual device. Each configured output attempt records output name, success/error, latency and the telemetry position/speed/heading summary. The browser reads this through `/api/devices/{id}/transmissions` and may clear only that device's in-memory history. The history is intentionally capped at 100 entries per device and is not persistent audit storage; process restart clears it. Secrets, broker URLs, gateway addresses and bearer keys are never included in this API.

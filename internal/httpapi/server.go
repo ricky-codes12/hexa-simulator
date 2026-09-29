@@ -159,6 +159,39 @@ func HandlerWithRuntime(revision string, store DeviceStore, webRoot string, runt
 		}
 		writeJSON(writer, http.StatusOK, runtime.State(id))
 	})
+	mux.HandleFunc("GET /api/devices/{id}/transmissions", func(writer http.ResponseWriter, request *http.Request) {
+		if runtime == nil {
+			writeError(writer, http.StatusServiceUnavailable, "server-side simulation runtime is unavailable")
+			return
+		}
+		var id int64
+		if _, err := fmtSscan(request.PathValue("id"), &id); err != nil || id < 1 {
+			writeError(writer, http.StatusBadRequest, "invalid device id")
+			return
+		}
+		limit := int64(50)
+		if raw := request.URL.Query().Get("limit"); raw != "" {
+			if _, err := fmtSscan(raw, &limit); err != nil || limit < 1 || limit > 100 {
+				writeError(writer, http.StatusBadRequest, "invalid limit")
+				return
+			}
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"items": runtime.TransmissionLogs(id, int(limit))})
+	})
+	mux.HandleFunc("DELETE /api/devices/{id}/transmissions", func(writer http.ResponseWriter, request *http.Request) {
+		if runtime == nil {
+			writeError(writer, http.StatusServiceUnavailable, "server-side simulation runtime is unavailable")
+			return
+		}
+		var id int64
+		if _, err := fmtSscan(request.PathValue("id"), &id); err != nil || id < 1 {
+			writeError(writer, http.StatusBadRequest, "invalid device id")
+			return
+		}
+		runtime.ClearTransmissionLogs(id)
+		writer.WriteHeader(http.StatusNoContent)
+	})
+
 	mux.HandleFunc("POST /api/devices/{id}/simulation", func(writer http.ResponseWriter, request *http.Request) {
 		if runtime == nil {
 			writeError(writer, http.StatusServiceUnavailable, "server-side simulation runtime is unavailable")
