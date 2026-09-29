@@ -31,3 +31,24 @@ func TestServerRuntimeContinuesWithoutBrowser(t *testing.T) {
 	}
 	_, _ = r.Apply(1, SimulationControl{Action: "stop"})
 }
+
+type namedFakeForwarder struct{ fakeForwarder }
+
+func (f *namedFakeForwarder) OutputName() string { return "mqtt" }
+
+func TestSimulationRuntimeReportsNamedOutputState(t *testing.T) {
+	s := &fakeStore{items: []Device{{ID: 7, Name: "Truck", IMEI: "356307042441007", Latitude: -3.0, Longitude: 104.75, UpdatedAt: time.Now()}}}
+	f := &namedFakeForwarder{}
+	r := NewSimulationRuntime(context.Background(), s, time.Hour, f)
+	if got := r.State(7).Outputs["mqtt"].Status; got != "ready" {
+		t.Fatalf("initial mqtt status=%q", got)
+	}
+	if _, err := r.Apply(7, SimulationControl{Action: "start", Mode: "manual", Speed: 40, Heading: 90}); err != nil {
+		t.Fatal(err)
+	}
+	out := r.State(7).Outputs["mqtt"]
+	if out.Status != "sending" || out.LastOK.IsZero() {
+		t.Fatalf("mqtt output=%+v", out)
+	}
+	_, _ = r.Apply(7, SimulationControl{Action: "stop"})
+}

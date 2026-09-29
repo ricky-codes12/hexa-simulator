@@ -18,18 +18,31 @@ type SimulationControl struct {
 	Preset          string   `json:"preset,omitempty"`
 }
 
+type OutputState struct {
+	Configured bool      `json:"configured"`
+	Status     string    `json:"status"`
+	LastOK     time.Time `json:"last_ok,omitempty"`
+	LastError  string    `json:"last_error,omitempty"`
+}
+
+type NamedTelemetryForwarder interface {
+	TelemetryForwarder
+	OutputName() string
+}
+
 type SimulationState struct {
-	DeviceID        int64     `json:"device_id"`
-	Running         bool      `json:"running"`
-	Paused          bool      `json:"paused"`
-	Mode            string    `json:"mode"`
-	Speed           float64   `json:"speed"`
-	Heading         float64   `json:"heading"`
-	TargetLatitude  *float64  `json:"target_latitude,omitempty"`
-	TargetLongitude *float64  `json:"target_longitude,omitempty"`
-	Preset          string    `json:"preset,omitempty"`
-	LastTick        time.Time `json:"last_tick,omitempty"`
-	LastError       string    `json:"last_error,omitempty"`
+	DeviceID        int64                  `json:"device_id"`
+	Running         bool                   `json:"running"`
+	Paused          bool                   `json:"paused"`
+	Mode            string                 `json:"mode"`
+	Speed           float64                `json:"speed"`
+	Heading         float64                `json:"heading"`
+	TargetLatitude  *float64               `json:"target_latitude,omitempty"`
+	TargetLongitude *float64               `json:"target_longitude,omitempty"`
+	Preset          string                 `json:"preset,omitempty"`
+	LastTick        time.Time              `json:"last_tick,omitempty"`
+	LastError       string                 `json:"last_error,omitempty"`
+	Outputs         map[string]OutputState `json:"outputs,omitempty"`
 }
 
 type SimulationRuntime struct {
@@ -49,13 +62,33 @@ func NewSimulationRuntime(ctx context.Context, store DeviceStore, interval time.
 	return &SimulationRuntime{ctx: ctx, store: store, forwarders: forwarders, interval: interval, states: map[int64]*SimulationState{}, cancels: map[int64]context.CancelFunc{}}
 }
 
+func (r *SimulationRuntime) configuredOutputs() map[string]OutputState {
+	out := map[string]OutputState{}
+	for _, f := range r.forwarders {
+		if named, ok := f.(NamedTelemetryForwarder); ok {
+			out[named.OutputName()] = OutputState{Configured: true, Status: "ready"}
+		}
+	}
+	return out
+}
+
+func cloneOutputs(in map[string]OutputState) map[string]OutputState {
+	out := map[string]OutputState{}
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
 func (r *SimulationRuntime) State(id int64) SimulationState {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if s := r.states[id]; s != nil {
-		return *s
+		out := *s
+		out.Outputs = cloneOutputs(s.Outputs)
+		return out
 	}
-	return SimulationState{DeviceID: id, Mode: "auto", Speed: 40}
+	return SimulationState{DeviceID: id, Mode: "auto", Speed: 40, Outputs: r.configuredOutputs()}
 }
 
 func (r *SimulationRuntime) Apply(id int64, in SimulationControl) (SimulationState, error) {
@@ -77,7 +110,7 @@ func (r *SimulationRuntime) Apply(id int64, in SimulationControl) (SimulationSta
 	r.mu.Lock()
 	s := r.states[id]
 	if s == nil {
-		s = &SimulationState{DeviceID: id, Mode: "auto", Speed: 40, Heading: d.Heading}
+		s = &SimulationState{DeviceID: id, Mode: "auto", Speed: 40, Heading: d.Heading, Outputs: r.configuredOutputs()}
 		r.states[id] = s
 	}
 	if in.Mode != "" {
@@ -198,10 +231,21 @@ func (r *SimulationRuntime) tick(id int64) {
 		return
 	}
 	var last error
+	results := map[string]OutputState{}
 	for _, f := range r.forwarders {
+		name := "output"
+		if named, ok := f.(NamedTelemetryForwarder); ok {
+			name = named.OutputName()
+		}
+		result := OutputState{Configured: true, Status: "sending"}
 		if err := f.ForwardTelemetry(r.ctx, updated); err != nil {
 			last = err
+			result.Status = "error"
+			result.LastError = err.Error()
+		} else {
+			result.LastOK = updated.UpdatedAt
 		}
+		results[name] = result
 	}
 	r.mu.Lock()
 	if current := r.states[id]; current != nil {
@@ -213,6 +257,7 @@ func (r *SimulationRuntime) tick(id int64) {
 		} else {
 			current.LastError = ""
 		}
+		current.Outputs = results
 	}
 	r.mu.Unlock()
 }

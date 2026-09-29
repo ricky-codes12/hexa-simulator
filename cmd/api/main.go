@@ -133,6 +133,8 @@ func health(args []string) {
 
 type teltonikaForwarder struct{ client *teltonika.Client }
 
+func (f teltonikaForwarder) OutputName() string { return "teltonika-direct" }
+
 func (f teltonikaForwarder) ForwardTelemetry(ctx context.Context, device apphttp.Device) error {
 	return f.client.Send(ctx, teltonika.Telemetry{
 		IMEI: device.IMEI, Timestamp: device.UpdatedAt, Latitude: device.Latitude, Longitude: device.Longitude,
@@ -155,6 +157,8 @@ func gatewayTimeout() time.Duration {
 
 type sensorPushForwarder struct{ client sensorpush.Client }
 
+func (f sensorPushForwarder) OutputName() string { return "http-push" }
+
 func (f sensorPushForwarder) ForwardTelemetry(ctx context.Context, device apphttp.Device) error {
 	return f.client.Send(ctx, sensorpush.Telemetry{
 		HardwareID: device.IMEI, DeviceTime: device.UpdatedAt, Latitude: device.Latitude, Longitude: device.Longitude,
@@ -176,6 +180,8 @@ func sensorPushTimeout() time.Duration {
 }
 
 type mqttForwarder struct{ client *mqttout.Client }
+
+func (f mqttForwarder) OutputName() string { return "mqtt" }
 
 func (f mqttForwarder) ForwardTelemetry(ctx context.Context, device apphttp.Device) error {
 	return f.client.Publish(ctx, mqttout.Telemetry{HardwareID: device.IMEI, DeviceTime: device.UpdatedAt, Latitude: device.Latitude, Longitude: device.Longitude, Speed: device.Speed, Heading: device.Heading, Ignition: device.Ignition, Movement: device.Speed > 0})
