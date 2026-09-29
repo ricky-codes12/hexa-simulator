@@ -24,7 +24,7 @@ scripts/                setup, migration and canonical verification
 
 ## Device simulator MVP
 
-The product model is `Device`, persisted in PostgreSQL and exposed through `/api/devices`. The browser owns the demo simulation clock. Starting a device emits a telemetry update immediately and every three seconds while that page remains open. If the page reloads while a device is persisted as online, the browser resumes that device's simulation clock. Stopping it persists an offline sample with speed zero. Devices can also be deleted through the API/UI.
+The product model is `Device`, persisted in PostgreSQL and exposed through `/api/devices`. The Go API owns the demo simulation clock. Starting a device emits a telemetry update immediately and the server continues the three-second runtime loop independently of whether the browser remains open. Browser reloads reconnect to the persisted device/runtime state rather than owning the clock. Stopping it persists an offline sample with speed zero. Devices can also be deleted through the API/UI.
 
 Telemetry follows one of two deterministic synthetic forestry haul routes selected from the device ID. The routes stay inside the same South Sumatra demo bounds used by Hexa.Sensor (`104.688,-3.042` to `104.905,-2.928`), so pushed telemetry remains visible in the Sensor demo world instead of landing outside its constrained map. This makes demonstrations repeatable instead of using random coordinate drift. The Go API continues to validate status, latitude, longitude, speed, and heading before persisting the latest sample.
 
