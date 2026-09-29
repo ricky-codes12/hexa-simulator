@@ -44,7 +44,13 @@ func (c *Client) Publish(ctx context.Context, t Telemetry) error {
 	if err := c.ensure(ctx); err != nil {
 		return err
 	}
-	payload, _ := json.Marshal(map[string]any{"schema": "hexa.sensor/telemetry/v1", "hardware_id": t.HardwareID, "device_time": t.DeviceTime.UTC().Format(time.RFC3339Nano), "position": map[string]any{"latitude": t.Latitude, "longitude": t.Longitude, "speed": t.Speed, "heading": t.Heading}, "attributes": map[string]any{"ignition": t.Ignition, "movement": t.Movement}})
+	timeout := c.Timeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	_ = c.conn.SetDeadline(time.Now().Add(timeout))
+	defer c.conn.SetDeadline(time.Time{})
+	payload, _ := json.Marshal(map[string]any{"schema": "hexa.sensor/telemetry/v1", "device": map[string]any{"hardware_id": t.HardwareID}, "device_time": t.DeviceTime.UTC().Format(time.RFC3339Nano), "position": map[string]any{"fix_valid": true, "lat": t.Latitude, "lon": t.Longitude, "speed_kmh": t.Speed, "heading_deg": t.Heading}, "attributes": map[string]any{"ignition": t.Ignition, "movement": t.Movement}})
 	topic := strings.ReplaceAll(c.Topic, "{imei}", t.HardwareID)
 	c.packetID++
 	if c.packetID == 0 {

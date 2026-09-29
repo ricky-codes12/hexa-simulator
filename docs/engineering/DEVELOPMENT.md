@@ -28,3 +28,7 @@ The server-owned simulation runtime reports configured output paths per selected
 ## Concurrent demo fleet runtime
 
 After demo-fleet provisioning, API startup starts every persisted device in the server-owned simulation runtime. The default 350-device fleet therefore remains live without an open browser. Initial device ticks are deterministically phased across the three-second interval rather than emitted as one startup burst. Manual pause/stop/start controls remain per-device and do not create duplicate loops. Protocol outputs continue to follow protected Runtime configuration.
+
+### Fleet-scale MQTT and Teltonika Direct
+
+Configured outputs are dispatched asynchronously from the simulation clock through bounded worker queues. Do not raise queue/worker limits to mask an unhealthy downstream service; inspect Protocol Outputs and the target service instead. MQTT emits the canonical Hexa.Sensor telemetry envelope on the configured topic. Teltonika Direct keeps independent persistent sessions per IMEI so the demo fleet can progress concurrently. Runtime addresses remain protected external configuration; the repository deliberately does not hard-code a broker or Sensor listener address.

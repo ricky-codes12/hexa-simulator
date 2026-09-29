@@ -13,10 +13,12 @@ Hexa Simulator is a Hexa.Build-native Svelte + Go + PostgreSQL application for d
 - With PostgreSQL configured, API startup idempotently fills the database to a 350-device demo target while preserving existing operator-created devices; Runtime activation therefore provisions an already-migrated database without requiring manual bulk entry.
 - The workspace clock follows the accessing browser timezone, using WIB/WITA/WIT labels for Indonesia and a localized full date including the year.
 - Inspect a dependency-free live route map with a moving, heading-aware vehicle marker plus speed, ignition, coordinates, and last-telemetry time.
-- Runtime startup automatically starts the complete persisted demo fleet (350 devices after provisioning) and emits deterministic forestry telemetry for every device approximately every three seconds, independent of browser sessions. Initial ticks are evenly phased across one interval to avoid a startup thundering herd.
+- Runtime startup automatically starts the complete persisted demo fleet (350 devices after provisioning) and emits deterministic forestry telemetry for every device approximately every three seconds, independent of browser sessions. Initial ticks are evenly phased across one interval to avoid a startup thundering herd, and startup does not report the fleet ready until every newly started worker has persisted that initial tick.
 - A page reload only observes the server-owned runtime; closing the browser does not stop fleet telemetry.
 - Telemetry input is range-validated by the API.
 - Optional backend-first Teltonika TCP output: when `TELTONIKA_GATEWAY_ADDR` is configured, online telemetry is encoded as Codec 8 Extended (`0x8E`) with an IMEI handshake, CRC-16/IBM, and AVL acknowledgement validation before the API reports success.
+- Optional MQTT QoS 1 output publishes the canonical Hexa.Sensor `hexa.sensor/telemetry/v1` envelope to `SIM_MQTT_URL` using the configured `{imei}` topic template.
+- Fleet protocol outputs use bounded asynchronous worker queues so a slow broker/listener cannot stop the 350-device simulation clock; Teltonika Direct keeps independent persistent sessions per IMEI.
 - HEXA.SENSOR HTTP Push integration: each persisted online telemetry update can be POSTed to the configured Hexa.Sensor ingest endpoint using the `hexa.sensor/telemetry/v1` schema and Bearer authentication.
 - The integration secret is never hardcoded; `SIM_SENSOR_PUSH_KEY` remains protected runtime configuration.
 

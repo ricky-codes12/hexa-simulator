@@ -47,7 +47,15 @@ func TestSimulationRuntimeReportsNamedOutputState(t *testing.T) {
 	if _, err := r.Apply(7, SimulationControl{Action: "start", Mode: "manual", Speed: 40, Heading: 90}); err != nil {
 		t.Fatal(err)
 	}
-	out := r.State(7).Outputs["mqtt"]
+	var out OutputState
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		out = r.State(7).Outputs["mqtt"]
+		if out.Status == "sending" && !out.LastOK.IsZero() {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
 	if out.Status != "sending" || out.LastOK.IsZero() {
 		t.Fatalf("mqtt output=%+v", out)
 	}
@@ -87,7 +95,15 @@ func TestStartFleetRunsEveryDeviceWithoutBrowser(t *testing.T) {
 			t.Fatalf("device %d state=%+v", d.ID, state)
 		}
 	}
-	time.Sleep(170 * time.Millisecond)
+	// StartFleet is a readiness barrier: once it returns, every newly-started
+	// worker has persisted its initial telemetry tick. No scheduler sleep belongs
+	// in this assertion.
+	for _, d := range items {
+		state := r.State(d.ID)
+		if state.LastTick.IsZero() {
+			t.Fatalf("device %d has no initial tick after StartFleet", d.ID)
+		}
+	}
 	online := 0
 	for _, d := range s.items {
 		if d.Status == "online" && !d.UpdatedAt.IsZero() {
@@ -95,6 +111,39 @@ func TestStartFleetRunsEveryDeviceWithoutBrowser(t *testing.T) {
 		}
 	}
 	if online != 350 {
-		t.Fatalf("online=%d want 350", online)
+		t.Fatalf("online=%d want 350 after runtime readiness", online)
 	}
+}
+
+type blockingForwarder struct {
+	release <-chan struct{}
+}
+
+func (f blockingForwarder) OutputName() string { return "teltonika-direct" }
+func (f blockingForwarder) ForwardTelemetry(ctx context.Context, d Device) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-f.release:
+		return nil
+	}
+}
+
+func TestSlowOutputDoesNotBlockSimulationClock(t *testing.T) {
+	release := make(chan struct{})
+	s := &fakeStore{items: []Device{{ID: 9, Name: "Truck", IMEI: "356307042441009", Latitude: -3.0, Longitude: 104.75, UpdatedAt: time.Now()}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := NewSimulationRuntime(ctx, s, 10*time.Millisecond, blockingForwarder{release: release})
+	if _, err := r.Apply(9, SimulationControl{Action: "start", Mode: "manual", Speed: 40, Heading: 90}); err != nil {
+		t.Fatal(err)
+	}
+	first := s.items[0].Longitude
+	time.Sleep(35 * time.Millisecond)
+	second := s.items[0].Longitude
+	if second <= first {
+		t.Fatalf("simulation clock stalled behind output: first=%v second=%v", first, second)
+	}
+	close(release)
+	_, _ = r.Apply(9, SimulationControl{Action: "stop"})
 }
