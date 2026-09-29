@@ -11,7 +11,8 @@
   type DriveMode = 'auto'|'manual'|'target';
   type DriveControl = { mode:DriveMode; speed:number; heading:number; target?:{latitude:number;longitude:number}; preset?:string; paused?:boolean };
   type OutputState={configured:boolean;status:'ready'|'sending'|'error';last_ok?:string;last_error?:string};
-  type SimulationState={device_id:number;running:boolean;paused:boolean;outputs?:Record<string,OutputState>};
+  type SimulationState={device_id:number;running:boolean;paused:boolean;mode?:DriveMode;speed?:number;heading?:number;preset?:string;last_tick?:string;last_error?:string;outputs?:Record<string,OutputState>};
+  type TransmissionLog={timestamp:string;output:string;status:'success'|'error';latency_ms:number;latitude:number;longitude:number;speed:number;heading:number;error?:string};
   type AuthUser={id:number;email:string;display_name:string;role:string;mfa_enabled:boolean};
   type SessionInfo={id:string;user_agent:string;ip_address:string;last_seen_at:string;created_at:string;expires_at:string};
   let user=$state<AuthUser|null>(null), csrf=$state(''), authChecked=$state(false), loginUsername=$state('hexa-dev'), loginPassword=$state(''), showLoginPassword=$state(false), loginCode=$state(''), authError=$state('');
@@ -70,6 +71,7 @@
   let routeSteps=new Map<number,number>();
   let driveControls=$state(new Map<number,DriveControl>());
   let targetMarker:Marker|null=null, refreshing=$state(false), simulationState=$state<SimulationState|null>(null);
+  let transmissionLogs=$state<TransmissionLog[]>([]), logsExpanded=$state(false), logFilter=$state<'all'|'success'|'error'>('all');
 
   function routeFor(device:Device){ return routes[(device.id-1)%routes.length]; }
   function controlFor(device:Device){
@@ -138,15 +140,20 @@
   function updatedLabel(value:string){ const date=new Date(value); return Number.isNaN(date.getTime())?'Waiting for telemetry':date.toLocaleString(); }
   async function loadExplorer(offset=0){explorerLoading=true;try{const params=new URLSearchParams({limit:String(explorerLimit),offset:String(offset)});if(search.trim())params.set('query',search.trim());const r=await apiFetch(`/api/devices?${params}`);if(!r.ok)throw new Error('Unable to search devices');const p=await r.json();explorerItems=p.items??[];explorerTotal=p.total??explorerItems.length;explorerOffset=p.offset??offset}catch(e){message=e instanceof Error?e.message:'Unable to search devices'}finally{explorerLoading=false}}
   async function openDeviceExplorer(){deviceExplorerOpen=true;search='';await loadExplorer(0)}
-  function chooseDevice(device:Device){const existing=devices.find(d=>d.id===device.id);if(existing)devices=devices.map(d=>d.id===device.id?device:d);else devices=[device,...devices];selected=device;deviceExplorerOpen=false;simulationExpanded=false;syncMapDevice(device);void loadSimulationState(device)}
+  function chooseDevice(device:Device){const existing=devices.find(d=>d.id===device.id);if(existing)devices=devices.map(d=>d.id===device.id?device:d);else devices=[device,...devices];selected=device;deviceExplorerOpen=false;simulationExpanded=false;logsExpanded=false;syncMapDevice(device);void loadSimulationState(device)}
   function toggleContextLayer(){showMapLayer=!showMapLayer;if(!liveMap)return;for(const id of ['estate-fill','estate-outline','conservation-fill','conservation-outline','facility-area','roads-shadow','roads','facilities'])if(liveMap.getLayer(id))liveMap.setLayoutProperty(id,'visibility',showMapLayer?'visible':'none');for(const marker of contextMarkers)marker.getElement().style.display=showMapLayer?'':'none'}
   async function toggleMapFullscreen(){ if(!mapStage)return; if(document.fullscreenElement===mapStage) await document.exitFullscreen(); else await mapStage.requestFullscreen(); }
 
   async function loadSimulationState(device:Device|null){
-    if(!device){simulationState=null;return}
-    const r=await apiFetch(`/api/devices/${device.id}/simulation`);
-    simulationState=r.ok?await r.json():null;
+    if(!device){simulationState=null;transmissionLogs=[];return}
+    const [stateResponse,logsResponse]=await Promise.all([apiFetch(`/api/devices/${device.id}/simulation`),apiFetch(`/api/devices/${device.id}/transmissions?limit=50`)]);
+    simulationState=stateResponse.ok?await stateResponse.json():null;
+    transmissionLogs=logsResponse.ok?(await logsResponse.json()).items||[]:[];
   }
+  function visibleLogs(){return logFilter==='all'?transmissionLogs:transmissionLogs.filter(item=>item.status===logFilter)}
+  function logTime(value:string){const d=new Date(value);return Number.isNaN(d.getTime())?'—':d.toLocaleTimeString(language==='id'?'id-ID':'en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})}
+  function outputDetail(key:string){const state=outputState(key);if(!state)return t('notConfigured');if(state.status==='error')return state.last_error||t('outputError');if(state.last_ok)return `${t('sending')} · ${logTime(state.last_ok)}`;return t('configured')}
+  async function clearTransmissionLogs(){if(!selected)return;const r=await apiFetch(`/api/devices/${selected.id}/transmissions`,{method:'DELETE'});if(r.ok)transmissionLogs=[];else message=language==='id'?'Gagal menghapus log transmisi':'Unable to clear transmission logs'}
   function outputState(key:string):OutputState|undefined{return simulationState?.outputs?.[key]}
   function outputLabel(key:string){const state=outputState(key);if(!state)return t('notConfigured');return state.status==='error'?t('outputError'):state.status==='sending'?t('sending'):t('configured')}
   async function refresh(){
@@ -254,8 +261,21 @@
               <div class="protocol-output-card">
                 <div class="protocol-output-title"><span>{t('outputs')}</span><small>HTTP · MQTT · TCP</small></div>
                 {#each [['http-push','HTTP Push'],['mqtt','MQTT'],['teltonika-direct','Teltonika Direct']] as output}
-                  <div class="protocol-output-row"><i class:ok={outputState(output[0])?.status==='sending'} class:error={outputState(output[0])?.status==='error'}></i><strong>{output[1]}</strong><span>{outputLabel(output[0])}</span></div>
+                  <div class="protocol-output-row"><i class:ok={outputState(output[0])?.status==='sending'} class:error={outputState(output[0])?.status==='error'}></i><strong>{output[1]}</strong><span title={outputState(output[0])?.last_error||''}>{outputDetail(output[0])}</span></div>
                 {/each}
+              </div>
+              <div class="runtime-observability">
+                <div><span>{language==='id'?'Status runtime':'Runtime status'}</span><strong class:green={simulationState?.running&&!simulationState?.paused}>{simulationState?.paused?(language==='id'?'Jeda':'Paused'):simulationState?.running?(language==='id'?'Berjalan':'Running'):(language==='id'?'Berhenti':'Stopped')}</strong></div>
+                <div><span>{language==='id'?'Mode / skenario':'Mode / scenario'}</span><strong>{simulationState?.mode||controlFor(selected).mode}{simulationState?.preset?` · ${simulationState.preset}`:''}</strong></div>
+                <div><span>{language==='id'?'Tick terakhir':'Last tick'}</span><strong>{simulationState?.last_tick?updatedLabel(simulationState.last_tick):'—'}</strong></div>
+                <div><span>{language==='id'?'Telemetri':'Telemetry'}</span><strong>{selected.latitude.toFixed(5)}, {selected.longitude.toFixed(5)} · {Math.round(selected.speed)} km/h · {Math.round(selected.heading)}°</strong></div>
+              </div>
+              <div class="transmission-accordion">
+                <button class="simulation-accordion-toggle" aria-expanded={logsExpanded} onclick={()=>logsExpanded=!logsExpanded}><span>⇄ {language==='id'?'Log Transmisi':'Transmission Logs'}</span><span class="control-summary">{transmissionLogs.length} {language==='id'?'terbaru':'recent'}</span><b>{logsExpanded?'⌃':'⌄'}</b></button>
+                {#if logsExpanded}<div class="transmission-panel">
+                  <div class="transmission-toolbar"><div><button class:active={logFilter==='all'} onclick={()=>logFilter='all'}>{language==='id'?'Semua':'All'}</button><button class:active={logFilter==='success'} onclick={()=>logFilter='success'}>OK</button><button class:active={logFilter==='error'} onclick={()=>logFilter='error'}>Error</button></div><button class="clear-log" onclick={()=>void clearTransmissionLogs()}>{language==='id'?'Hapus log':'Clear'}</button></div>
+                  <div class="transmission-list">{#if visibleLogs().length===0}<div class="empty-log">{language==='id'?'Belum ada transmisi untuk ditampilkan.':'No transmissions to show yet.'}</div>{:else}{#each visibleLogs() as item}<div class:error={item.status==='error'} class="transmission-row"><i></i><div><strong>{item.output}</strong><span>{logTime(item.timestamp)} · {item.latency_ms} ms</span></div><div class="transmission-summary"><b>{Math.round(item.speed)} km/h · {Math.round(item.heading)}°</b><span class="mono">{item.latitude.toFixed(5)}, {item.longitude.toFixed(5)}</span>{#if item.error}<em title={item.error}>{item.error}</em>{/if}</div></div>{/each}{/if}</div>
+                </div>{/if}
               </div>
               <div class="simulation-accordion">
                 <button class="simulation-accordion-toggle" aria-expanded={simulationExpanded} title={simulationExpanded?t('hideControls'):t('showControls')} onclick={()=>simulationExpanded=!simulationExpanded}><span>⚙ {t('simulation')}</span><span class="control-summary">{controlFor(selected).preset||controlFor(selected).mode} · {controlFor(selected).speed} km/h</span><b>{simulationExpanded?'⌃':'⌄'}</b></button>

@@ -160,3 +160,31 @@ func TestSlowOutputDoesNotBlockSimulationClock(t *testing.T) {
 	close(release)
 	_, _ = r.Apply(9, SimulationControl{Action: "stop"})
 }
+
+func TestSimulationRuntimeKeepsBoundedTransmissionHistory(t *testing.T) {
+	s := &fakeStore{items: []Device{{ID: 11, Name: "Truck", IMEI: "356307042441011", Latitude: -3.0, Longitude: 104.75, UpdatedAt: time.Now()}}}
+	f := &namedFakeForwarder{}
+	r := NewSimulationRuntime(context.Background(), s, time.Hour, f)
+	if _, err := r.Apply(11, SimulationControl{Action: "start", Mode: "manual", Speed: 40, Heading: 90}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && len(r.TransmissionLogs(11, 50)) == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	logs := r.TransmissionLogs(11, 50)
+	if len(logs) == 0 {
+		t.Fatal("expected transmission history")
+	}
+	if logs[0].Output != "mqtt" || logs[0].Status != "success" {
+		t.Fatalf("log=%+v", logs[0])
+	}
+	if logs[0].Latitude == 0 || logs[0].Longitude == 0 {
+		t.Fatalf("missing telemetry summary: %+v", logs[0])
+	}
+	r.ClearTransmissionLogs(11)
+	if got := len(r.TransmissionLogs(11, 50)); got != 0 {
+		t.Fatalf("logs after clear=%d", got)
+	}
+	_, _ = r.Apply(11, SimulationControl{Action: "stop"})
+}
