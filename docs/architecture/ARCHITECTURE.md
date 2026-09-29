@@ -55,3 +55,9 @@ When HTTP Push configuration is absent, standalone simulator behavior is unchang
 Simulator access uses server-side sessions and requires TOTP enrollment before an authenticated account can use simulator or administration APIs. Password verification is the first sign-in step. Accounts with MFA already enabled receive an explicit MFA challenge before a session is created. Accounts without MFA receive a restricted session that may access only authentication and MFA-enrollment endpoints until a TOTP secret is verified.
 
 The enrollment UI renders the backend-issued `otpauth://` URI as a local QR code in the browser and also exposes the setup key as a fallback. The QR image is generated client-side; the TOTP secret is not sent to any third-party QR service. After successful verification, recovery codes are shown once and normal simulator access is enabled. Subsequent sign-ins require the authenticator or a recovery code.
+
+## Server-side multi-protocol simulation runtime
+
+Simulation progression is owned by the Go API, not by a browser timer. `POST /api/devices/{id}/simulation` changes start/pause/resume/stop and drive controls; the runtime ticks approximately every three seconds, persists current telemetry, and fans each online record to configured outputs. Reopening the UI only observes and controls this state, so it must not create a second simulation loop.
+
+Output adapters are optional and environment-owned: existing Hexa.Sensor HTTP Push, persistent per-IMEI Teltonika Direct TCP with Codec 8 or 8E and acknowledgement/reconnect, and MQTT 3.1.1 QoS 1 publish using the `hexa.sensor/telemetry/v1` JSON contract. MQTT credentials and Sensor keys remain protected Runtime configuration and must never be committed or returned to the browser. Teltonika/Sitepat cloud mocks are intentionally out of scope until authoritative vendor API contracts exist.

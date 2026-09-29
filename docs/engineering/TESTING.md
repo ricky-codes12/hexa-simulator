@@ -14,3 +14,7 @@ Gateway unit tests run entirely on loopback: the existing Teltonika client conne
 For `.hexa/project dev`, treat `127.0.0.1:5173` (web) and `127.0.0.1:8080` (API) as one supervised development instance. A create/delete observed through the web UI must be verified against `http://127.0.0.1:8080/api/devices`; do not use an unrelated listener as evidence for the supervised instance.
 
 HTTP Push qualification requires protected `SIM_SENSOR_PUSH_URL` and `SIM_SENSOR_PUSH_KEY` values (with optional `SIM_SENSOR_PUSH_TIMEOUT`). The project contract explicitly permits those variables to reach the adapter. Never print the key during qualification. Verify the Sensor readiness endpoint separately, then verify that fresh simulator telemetry advances the device timestamp and is accepted by the configured Sensor connector.
+
+## Multi-protocol runtime qualification
+
+Unit tests prove the server-owned simulation loop progresses without browser requests, Codec 8/8E packet construction, Teltonika handshake/ACK behavior, HTTP Push normalization, and MQTT protocol behavior where exercised. Release qualification must additionally use protected integration configuration to prove fresh telemetry reaches the actual Hexa.Sensor HTTP Push, Teltonika Direct listener, and MQTT broker/subscriber. A successful build alone is not evidence of those external paths. For browser-independence acceptance, start a device, close the UI, wait for multiple runtime ticks, and verify the Sensor device timestamp continues advancing before reopening the UI.
