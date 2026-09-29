@@ -31,7 +31,7 @@
   async function loadMe(){try{const r=await fetch('/api/auth/me');if(r.ok){const p=await r.json();user=p.user;csrf=p.csrf_token||'';if(user&&!user.mfa_enabled){authStep='setup';await setupMFA()}}}finally{authChecked=true}}
   async function login(){authError='';const r=await fetch('/api/auth/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:loginUsername,password:loginPassword,code:authStep==='mfa'?loginCode:''})});if(r.status===202){authStep='mfa';loginCode='';return}if(!r.ok){authError=(await r.json().catch(()=>({error:'Sign in failed'}))).error||'Sign in failed';return}const p=await r.json();user=p.user;csrf=p.csrf_token;loginCode='';if(p.mfa_setup_required){authStep='setup';await setupMFA();return}loginPassword='';authStep='password';await refresh()}
   async function backToPassword(){authStep='password';loginCode='';authError=''}
-  async function logout(){await apiFetch('/api/auth/logout',{method:'POST'});user=null;csrf='';devices=[];selected=null;profileOpen=false}
+  async function logout(){await apiFetch('/api/auth/logout',{method:'POST'});user=null;csrf='';devices=[];fleetDevices=[];fleetRendered.clear();selected=null;profileOpen=false}
   async function openSecurity(){view='security';profileOpen=false;const r=await apiFetch('/api/security/sessions');if(r.ok)sessions=(await r.json()).items||[]}
   async function openUsers(){view='users';profileOpen=false;const r=await apiFetch('/api/admin/users');if(r.ok)users=(await r.json()).items||[]}
   async function createUser(){const r=await apiFetch('/api/admin/users',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:newUserEmail,displayName:newUserName,role:newUserRole,password:newUserPassword})});if(r.ok){newUserEmail='';newUserName='';newUserPassword='';await openUsers()}else message='Unable to create user'}
@@ -60,14 +60,14 @@
     return {latitude:point[1],longitude:point[0],speed:22+(index%4)*5,heading:headingBetween(point,next)};
   }));
 
-  let health=$state<Health|null>(null), devices=$state<Device[]>([]), selected=$state<Device|null>(null);
+  let health=$state<Health|null>(null), devices=$state<Device[]>([]), fleetDevices=$state<Device[]>([]), selected=$state<Device|null>(null);
   let showAdd=$state(false), saving=$state(false), message=$state('Connecting…');
   let name=$state(''), imei=$state(''), model=$state('Teltonika FMC920');
   let search=$state(''), showMapLayer=$state(true), deviceExplorerOpen=$state(false), explorerItems=$state<Device[]>([]), explorerTotal=$state(0), explorerOffset=$state(0), explorerLoading=$state(false);
   const explorerLimit=50;
   let mapStage:HTMLDivElement|null=$state(null), mapContainer:HTMLDivElement|null=$state(null);
-  let liveMap:MapLibreMap|null=null, liveMarker:Marker|null=null, contextMarkers:Marker[]=[] , animationFrame=0;
-  let renderedPosition:{lng:number;lat:number;heading:number}|null=null, trailByDevice=new Map<number,[number,number][]>();
+  let liveMap:MapLibreMap|null=null, liveMarker:Marker|null=null, contextMarkers:Marker[]=[] , animationFrame=0, fleetAnimationFrame=0;
+  let renderedPosition:{lng:number;lat:number;heading:number}|null=null, fleetRendered=new Map<number,{lng:number;lat:number}>(), trailByDevice=new Map<number,[number,number][]>();
   let routeSteps=new Map<number,number>();
   let driveControls=$state(new Map<number,DriveControl>());
   let targetMarker:Marker|null=null, refreshing=$state(false), simulationState=$state<SimulationState|null>(null);
@@ -105,6 +105,29 @@
     for(const feature of worldLabels.features){const [lng,lat]=feature.geometry.coordinates;add(lng,lat,String(feature.properties?.name??''),'area')}
     for(const feature of worldFacilities.features){const [lng,lat]=feature.geometry.coordinates;add(lng,lat,String(feature.properties?.name??''),'facility')}
   }
+  function fleetGeoJSON(positions:Map<number,{lng:number;lat:number}> = fleetRendered){
+    return {type:'FeatureCollection' as const,features:fleetDevices.map(device=>{const position=positions.get(device.id)??{lng:device.longitude,lat:device.latitude};return {type:'Feature' as const,properties:{id:device.id,name:device.name,online:device.status==='online',selected:device.id===selected?.id},geometry:{type:'Point' as const,coordinates:[position.lng,position.lat]}}})};
+  }
+  function renderFleet(positions:Map<number,{lng:number;lat:number}> = fleetRendered){
+    const source=liveMap?.getSource('fleet') as GeoJSONSource|undefined;if(source)source.setData(fleetGeoJSON(positions));
+  }
+  function animateFleet(next:Device[]){
+    fleetDevices=next; if(!liveMap)return;
+    const from=new Map<number,{lng:number;lat:number}>();
+    for(const device of next){const current=fleetRendered.get(device.id)??{lng:device.longitude,lat:device.latitude};from.set(device.id,current);if(!fleetRendered.has(device.id))fleetRendered.set(device.id,current)}
+    cancelAnimationFrame(fleetAnimationFrame);const started=performance.now(),duration=2800;
+    const tick=(time:number)=>{const raw=Math.min(1,(time-started)/duration),t=raw<.5?2*raw*raw:1-Math.pow(-2*raw+2,2)/2;const frame=new Map<number,{lng:number;lat:number}>();
+      for(const device of next){const a=from.get(device.id)??{lng:device.longitude,lat:device.latitude};frame.set(device.id,{lng:a.lng+(device.longitude-a.lng)*t,lat:a.lat+(device.latitude-a.lat)*t})}
+      fleetRendered=frame;renderFleet(frame);if(raw<1)fleetAnimationFrame=requestAnimationFrame(tick)};
+    fleetAnimationFrame=requestAnimationFrame(tick);
+  }
+  async function loadFleet(){
+    const pageSize=100;const first=await apiFetch(`/api/devices?limit=${pageSize}&offset=0`);if(!first.ok)throw new Error('Unable to load live fleet');const initial=await first.json();const total=Number(initial.total??initial.items?.length??0);const pages=[...(initial.items??[])];const requests:Promise<Response>[]=[];
+    for(let offset=pageSize;offset<total;offset+=pageSize)requests.push(apiFetch(`/api/devices?limit=${pageSize}&offset=${offset}`));
+    for(const response of await Promise.all(requests)){if(!response.ok)throw new Error('Unable to load live fleet');const page=await response.json();pages.push(...(page.items??[]))}
+    animateFleet(pages);
+    return pages;
+  }
   function updateTrail(device:Device,lng:number,lat:number){
     const trail=trailByDevice.get(device.id)??[];const last=trail[trail.length-1];
     if(!last||Math.abs(last[0]-lng)>1e-7||Math.abs(last[1]-lat)>1e-7){trail.push([lng,lat]);if(trail.length>200)trail.splice(0,trail.length-200);trailByDevice.set(device.id,trail)}
@@ -127,8 +150,10 @@
     const map=new MapLibreMap({container:mapContainer,style:forestryStyle(),bounds:FORESTRY_BOUNDS,fitBoundsOptions:{padding:24},attributionControl:false,maxBounds:FORESTRY_BOUNDS});
     map.addControl(new NavigationControl({showCompass:true}),'top-right');
     map.on('error',(event)=>{console.error('Live map error',event.error);message='Live map context failed to load'});
-    map.on('load',()=>{addContextMarkers(map);map.resize();map.fitBounds(FORESTRY_BOUNDS,{padding:36,duration:0});if(selected)animateMarker(selected)});
-    map.on('click',(event)=>{if(!selected)return;const control=controlFor(selected);if(control.mode!=='target')return;setControl(selected,{target:{latitude:event.lngLat.lat,longitude:event.lngLat.lng},heading:headingBetween([selected.longitude,selected.latitude],[event.lngLat.lng,event.lngLat.lat]),preset:undefined});message=`Target set for ${selected.name}`});
+    map.on('load',()=>{addContextMarkers(map);map.resize();map.fitBounds(FORESTRY_BOUNDS,{padding:36,duration:0});renderFleet();if(selected)animateMarker(selected)});
+    map.on('click','fleet-devices',(event)=>{const id=Number(event.features?.[0]?.properties?.id);const device=fleetDevices.find(item=>item.id===id);if(device)chooseDevice(device)});
+    map.on('mouseenter','fleet-devices',()=>{map.getCanvas().style.cursor='pointer'});map.on('mouseleave','fleet-devices',()=>{map.getCanvas().style.cursor=''});
+    map.on('click',(event)=>{if(map.queryRenderedFeatures(event.point,{layers:['fleet-devices']}).length)return;if(!selected)return;const control=controlFor(selected);if(control.mode!=='target')return;setControl(selected,{target:{latitude:event.lngLat.lat,longitude:event.lngLat.lng},heading:headingBetween([selected.longitude,selected.latitude],[event.lngLat.lng,event.lngLat.lat]),preset:undefined});message=`Target set for ${selected.name}`});
     liveMap=map;
   }
   function syncTargetMarker(){if(targetMarker){targetMarker.remove();targetMarker=null}if(!liveMap||!selected)return;const target=controlFor(selected).target;if(!target)return;const el=document.createElement('div');el.className='target-point-marker';el.textContent='×';targetMarker=new Marker({element:el}).setLngLat([target.longitude,target.latitude]).addTo(liveMap)}
@@ -140,7 +165,7 @@
   function updatedLabel(value:string){ const date=new Date(value); return Number.isNaN(date.getTime())?'Waiting for telemetry':date.toLocaleString(); }
   async function loadExplorer(offset=0){explorerLoading=true;try{const params=new URLSearchParams({limit:String(explorerLimit),offset:String(offset)});if(search.trim())params.set('query',search.trim());const r=await apiFetch(`/api/devices?${params}`);if(!r.ok)throw new Error('Unable to search devices');const p=await r.json();explorerItems=p.items??[];explorerTotal=p.total??explorerItems.length;explorerOffset=p.offset??offset}catch(e){message=e instanceof Error?e.message:'Unable to search devices'}finally{explorerLoading=false}}
   async function openDeviceExplorer(){deviceExplorerOpen=true;search='';await loadExplorer(0)}
-  function chooseDevice(device:Device){const existing=devices.find(d=>d.id===device.id);if(existing)devices=devices.map(d=>d.id===device.id?device:d);else devices=[device,...devices];selected=device;deviceExplorerOpen=false;simulationExpanded=false;logsExpanded=false;syncMapDevice(device);void loadSimulationState(device)}
+  function chooseDevice(device:Device){const existing=devices.find(d=>d.id===device.id);if(existing)devices=devices.map(d=>d.id===device.id?device:d);else devices=[device,...devices];selected=device;deviceExplorerOpen=false;simulationExpanded=false;logsExpanded=false;renderFleet();syncMapDevice(device);void loadSimulationState(device)}
   function toggleContextLayer(){showMapLayer=!showMapLayer;if(!liveMap)return;for(const id of ['estate-fill','estate-outline','conservation-fill','conservation-outline','facility-area','roads-shadow','roads','facilities'])if(liveMap.getLayer(id))liveMap.setLayoutProperty(id,'visibility',showMapLayer?'visible':'none');for(const marker of contextMarkers)marker.getElement().style.display=showMapLayer?'':'none'}
   async function toggleMapFullscreen(){ if(!mapStage)return; if(document.fullscreenElement===mapStage) await document.exitFullscreen(); else await mapStage.requestFullscreen(); }
 
@@ -161,8 +186,7 @@
     try{
       const hr=await fetch('/healthz'); health=await hr.json();
       if(!health?.database_ready){message='Database is not ready';return}
-      const r=await apiFetch('/api/devices?limit=50'); if(!r.ok) throw new Error('Unable to load devices');
-      const p=await r.json(); devices=p.items??[]; syncSelected(); if(!selected&&devices.length) selected=devices[0]; message='Simulator ready'; await loadSimulationState(selected);
+      const fleet=await loadFleet(); devices=fleet.slice(0,50); const selectedID=selected?.id; selected=(selectedID?fleet.find(d=>d.id===selectedID):undefined)??fleet[0]??null; if(selected){renderFleet();syncMapDevice(selected)} message=`Simulator ready · ${fleet.length} live-map devices`; await loadSimulationState(selected);
 
     }catch(e){message=e instanceof Error?e.message:'Connection failed'}finally{refreshing=false}
   }
@@ -203,7 +227,7 @@
   }
   $effect(()=>{if(mapContainer){ensureMap();syncMapDevice(selected)}});
   $effect(()=>{if(selected)syncMapDevice(selected)});
-  $effect(()=>{let poll:ReturnType<typeof setInterval>|undefined;void loadMe().then(()=>{if(user?.mfa_enabled){void refresh();poll=setInterval(()=>void refresh(),3000)}}); return()=>{if(poll)clearInterval(poll);cancelAnimationFrame(animationFrame);for(const marker of contextMarkers)marker.remove();contextMarkers=[];liveMap?.remove();liveMap=null;liveMarker=null}});
+  $effect(()=>{let poll:ReturnType<typeof setInterval>|undefined;void loadMe().then(()=>{if(user?.mfa_enabled){void refresh();poll=setInterval(()=>void refresh(),3000)}}); return()=>{if(poll)clearInterval(poll);cancelAnimationFrame(animationFrame);cancelAnimationFrame(fleetAnimationFrame);for(const marker of contextMarkers)marker.remove();contextMarkers=[];liveMap?.remove();liveMap=null;liveMarker=null}});
 </script>
 
 {#if !authChecked}<div class="auth-screen"><div class="auth-loading"><div class="login-brand">Hexa.Simulator</div><p>{language==='id'?'Memeriksa sesi aman…':'Checking secure session…'}</p></div></div>{:else if !user || authStep==='setup' || authStep==='recovery'}<div class="auth-screen auth-layout"><section class="auth-hero"><div class="auth-brand"><span class="auth-logo">H+</span><strong>Hexa.Simulator</strong></div><div class="auth-hero-copy"><span class="eyebrow">{language==='id'?'Telemetri virtual. Keyakinan integrasi nyata.':'Virtual telemetry. Real integration confidence.'}</span><h1>{authStep==='setup'?'Secure your simulator.':authStep==='recovery'?'Keep a safe way back in.':authStep==='mfa'?'A second check. A safer workspace.':'Simulate every signal before it reaches the field.'}</h1><p>{authStep==='setup'?'Connect an authenticator app before entering your workspace.':authStep==='recovery'?'Save your recovery codes somewhere secure before continuing.':'Create virtual GPS devices, stream deterministic telemetry and validate Hexa.Sensor integrations from one workspace.'}</p><div class="signal-orbit"><span>{t('devices')}</span><span>{language==='id'?'Telemetri':'Telemetry'}</span><span>{language==='id'?'Push Sensor':'Sensor push'}</span><i></i></div></div><small>Hexa.Simulator · {language==='id'?'Ruang kerja aman':'Secure workspace'}</small></section><section class="auth-panel"><div class="auth-card"><div class="auth-language"><button class:active={language==='id'} onclick={()=>{if(language!=='id')toggleLanguage()}}><span class="flag-wave">🇮🇩</span> ID</button><button class:active={language==='en'} onclick={()=>{if(language!=='en')toggleLanguage()}}><span class="flag-wave delay">🇬🇧</span> EN</button></div>{#if authStep==='password'}<span class="eyebrow">{language==='id'?'Selamat datang di ruang kerja Anda':'Welcome to your workspace'}</span><h2>{language==='id'?'Masuk':'Sign in'}</h2><p>{language==='id'?'Masukkan akun administrator untuk melanjutkan.':'Enter your administrator account details to continue.'}</p><form onsubmit={(e)=>{e.preventDefault();void login()}}><label>Username<input bind:value={loginUsername} autocomplete="username" /></label><label>{language==='id'?'Kata sandi':'Password'}<span class="password-field"><input type={showLoginPassword?'text':'password'} bind:value={loginPassword} autocomplete="current-password" /><button type="button" class="password-toggle" aria-label={showLoginPassword?(language==='id'?'Sembunyikan kata sandi':'Hide password'):(language==='id'?'Tampilkan kata sandi':'Show password')} title={showLoginPassword?(language==='id'?'Sembunyikan kata sandi':'Hide password'):(language==='id'?'Tampilkan kata sandi':'Show password')} onclick={()=>showLoginPassword=!showLoginPassword}>{showLoginPassword?'◉':'◉̸'}</button></span></label>{#if authError}<div class="auth-error">{authError}</div>{/if}<button class="primary auth-submit">{language==='id'?'Lanjutkan':'Continue'}</button></form>{:else if authStep==='mfa'}<span class="eyebrow">{language==='id'?'Pemeriksaan identitas · Langkah 2 dari 2':'Identity check · Step 2 of 2'}</span><h2>{language==='id'?'Verifikasi dua faktor':'Two-factor verification'}</h2><p>{language==='id'?'Masukkan kode 6 digit dari aplikasi autentikator atau gunakan kode pemulihan.':'Enter the 6-digit code from your authenticator app, or use a recovery code.'}</p><form onsubmit={(e)=>{e.preventDefault();void login()}}><label>{language==='id'?'Kode autentikasi':'Authentication code'}<input class="code-input" bind:value={loginCode} autocomplete="one-time-code" inputmode="numeric" maxlength="32" placeholder="000000" autofocus /></label>{#if authError}<div class="auth-error">{authError}</div>{/if}<button class="primary auth-submit">{language==='id'?'Verifikasi':'Verify'}</button><button type="button" class="auth-link" onclick={()=>void backToPassword()}>{language==='id'?'Masuk dengan akun lain':'Sign in as someone else'}</button></form>{:else if authStep==='setup'}<span class="eyebrow">{language==='id'?'Pengaturan autentikator · Wajib':'Authenticator setup · Required'}</span><h2>{language==='id'?'Pindai kode QR Anda':'Scan your QR code'}</h2><p>{language==='id'?'Pindai kode ini dengan Google Authenticator, Microsoft Authenticator, 2FAS, atau aplikasi TOTP lain.':'Scan this code with Google Authenticator, Microsoft Authenticator, 2FAS, or another TOTP app.'}</p>{#if mfaSetup}<div class="qr-wrap">{#if mfaQR}<img src={mfaQR} alt="Authenticator QR code" />{/if}<div><small>{language==='id'?'Tidak bisa memindai? Masukkan kunci pengaturan ini:':"Can't scan it? Enter this setup key:"}</small><code>{mfaSetup.secret}</code></div></div><form onsubmit={(e)=>{e.preventDefault();void enableMFA()}}><label>{language==='id'?'Kode autentikasi 6 digit':'6-digit authentication code'}<input class="code-input" bind:value={mfaCode} autocomplete="one-time-code" inputmode="numeric" maxlength="6" placeholder="000000" /></label>{#if setupError}<div class="auth-error">{setupError}</div>{/if}<button class="primary auth-submit">{language==='id'?'Verifikasi dan aktifkan MFA':'Verify and enable MFA'}</button></form>{:else}<p>{language==='id'?'Menyiapkan kode QR aman…':'Preparing secure QR code…'}</p>{/if}{:else}<span class="eyebrow">{language==='id'?'MFA aktif':'MFA enabled'}</span><h2>{language==='id'?'Simpan kode pemulihan Anda':'Save your recovery codes'}</h2><p>{language==='id'?'Setiap kode dapat digunakan sekali jika autentikator tidak tersedia.':'Each code can be used once if your authenticator is unavailable.'}</p><div class="recovery-grid">{#each recovery as code}<code>{code}</code>{/each}</div><button class="primary auth-submit" onclick={()=>{authStep='password';loginPassword='';void refresh()}}>{language==='id'?'Lanjut ke Simulator':'Continue to Simulator'}</button>{/if}</div><div class="platform-ready"><span>●</span> {language==='id'?'Platform siap':'Platform ready'}</div></section></div>{:else}<div class="shell">
@@ -303,6 +327,7 @@
           {:else}
             <div class="map-empty"><span>⌁</span><strong>{t('noDevice')}</strong><small>{t('noDeviceHint')}</small></div>
           {/if}
+          <div class="map-fleet-count"><strong>{fleetDevices.length.toLocaleString()}</strong><span>{language==='id'?'perangkat aktif di peta':'devices on map'}</span></div>
           <div class="map-controls simulator-controls"><button class:control-active={showMapLayer} aria-label="Toggle map context layer" title="Toggle map context layer" onclick={toggleContextLayer}>▱</button><button aria-label={t('fullscreen')} title={t('fullscreen')} onclick={()=>void toggleMapFullscreen()}>⌗</button></div>
           <div class="map-legend"><span><i class="legend-operating"></i> {t('estateBoundary')}</span><span><i class="legend-trail"></i> {t('liveTrail')}</span><span><i class="legend-device"></i> {t('device')}</span><em>{t('offlineWorld')}</em></div>
           <div class="map-runtime"><i class:ok={health?.database_ready}></i>{health?.database_ready?t('runtimeReady'):t('runtimeUnavailable')}<span>·</span><span>{t('telemetrySmooth')}</span></div>
