@@ -12,7 +12,7 @@ Hexa Simulator is a Hexa.Build-native Svelte + Go + PostgreSQL application for d
 - Select devices through a paginated, server-side searchable Device Explorer (50 results per page) so the control workspace does not render an unbounded device list.
 - With PostgreSQL configured, API startup idempotently fills the database to a 350-device demo target while preserving existing operator-created devices; Runtime activation therefore provisions an already-migrated database without requiring manual bulk entry.
 - The workspace clock follows the accessing browser timezone, using WIB/WITA/WIT labels for Indonesia and a localized full date including the year.
-- Inspect a dependency-free live route map with a moving, heading-aware vehicle marker plus speed, ignition, coordinates, and last-telemetry time.
+- Inspect a dependency-free live route map that renders the complete server-owned demo fleet (350 virtual devices) from persisted runtime telemetry while keeping the selected device as a smooth, heading-aware marker with speed, ignition, coordinates, and last-telemetry time.
 - Runtime startup automatically starts the complete persisted demo fleet (350 devices after provisioning) and emits deterministic forestry telemetry for every device approximately every three seconds, independent of browser sessions. Initial ticks are evenly phased across one interval to avoid a startup thundering herd, and startup does not report the fleet ready until every newly started worker has persisted that initial tick.
 - A page reload only observes the server-owned runtime; closing the browser does not stop fleet telemetry.
 - Telemetry input is range-validated by the API.

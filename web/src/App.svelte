@@ -31,7 +31,7 @@
   async function loadMe(){try{const r=await fetch('/api/auth/me');if(r.ok){const p=await r.json();user=p.user;csrf=p.csrf_token||'';if(user&&!user.mfa_enabled){authStep='setup';await setupMFA()}}}finally{authChecked=true}}
   async function login(){authError='';const r=await fetch('/api/auth/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:loginUsername,password:loginPassword,code:authStep==='mfa'?loginCode:''})});if(r.status===202){authStep='mfa';loginCode='';return}if(!r.ok){authError=(await r.json().catch(()=>({error:'Sign in failed'}))).error||'Sign in failed';return}const p=await r.json();user=p.user;csrf=p.csrf_token;loginCode='';if(p.mfa_setup_required){authStep='setup';await setupMFA();return}loginPassword='';authStep='password';await refresh()}
   async function backToPassword(){authStep='password';loginCode='';authError=''}
-  async function logout(){await apiFetch('/api/auth/logout',{method:'POST'});user=null;csrf='';devices=[];selected=null;profileOpen=false}
+  async function logout(){await apiFetch('/api/auth/logout',{method:'POST'});user=null;csrf='';devices=[];fleetDevices=[];selected=null;profileOpen=false}
   async function openSecurity(){view='security';profileOpen=false;const r=await apiFetch('/api/security/sessions');if(r.ok)sessions=(await r.json()).items||[]}
   async function openUsers(){view='users';profileOpen=false;const r=await apiFetch('/api/admin/users');if(r.ok)users=(await r.json()).items||[]}
   async function createUser(){const r=await apiFetch('/api/admin/users',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:newUserEmail,displayName:newUserName,role:newUserRole,password:newUserPassword})});if(r.ok){newUserEmail='';newUserName='';newUserPassword='';await openUsers()}else message='Unable to create user'}
@@ -60,7 +60,7 @@
     return {latitude:point[1],longitude:point[0],speed:22+(index%4)*5,heading:headingBetween(point,next)};
   }));
 
-  let health=$state<Health|null>(null), devices=$state<Device[]>([]), selected=$state<Device|null>(null);
+  let health=$state<Health|null>(null), devices=$state<Device[]>([]), fleetDevices=$state<Device[]>([]), selected=$state<Device|null>(null);
   let showAdd=$state(false), saving=$state(false), message=$state('Connecting…');
   let name=$state(''), imei=$state(''), model=$state('Teltonika FMC920');
   let search=$state(''), showMapLayer=$state(true), deviceExplorerOpen=$state(false), explorerItems=$state<Device[]>([]), explorerTotal=$state(0), explorerOffset=$state(0), explorerLoading=$state(false);
@@ -99,6 +99,17 @@
   function syncSelected(){ if(selected) selected=devices.find(d=>d.id===selected?.id)??null; }
   function shortestHeading(from:number,to:number){return ((to-from+540)%360)-180}
   function markerElement(){const el=document.createElement('div');el.className='maplibre-device-marker';el.innerHTML='<span></span>';return el}
+  function fleetGeoJSON(){return {type:'FeatureCollection' as const,features:fleetDevices.map(device=>({type:'Feature' as const,id:device.id,properties:{id:device.id,name:device.name,status:device.status,speed:device.speed,heading:device.heading},geometry:{type:'Point' as const,coordinates:[device.longitude,device.latitude]}}))}}
+  function syncFleetMap(){const source=liveMap?.getSource('fleet-devices') as GeoJSONSource|undefined;if(source)source.setData(fleetGeoJSON())}
+  function installFleetLayer(map:MapLibreMap){
+    if(map.getSource('fleet-devices'))return;
+    map.addSource('fleet-devices',{type:'geojson',data:fleetGeoJSON()});
+    map.addLayer({id:'fleet-devices-halo',type:'circle',source:'fleet-devices',paint:{'circle-radius':['case',['==',['get','status'],'online'],7,5],'circle-color':['case',['==',['get','status'],'online'],'#18cba0','#657087'],'circle-opacity':0.18,'circle-stroke-width':0}});
+    map.addLayer({id:'fleet-devices-points',type:'circle',source:'fleet-devices',paint:{'circle-radius':['case',['==',['get','status'],'online'],3.8,3],'circle-color':['case',['==',['get','status'],'online'],'#36e0b5','#7b8495'],'circle-stroke-color':'#071016','circle-stroke-width':1.2}});
+    map.on('mouseenter','fleet-devices-points',()=>{map.getCanvas().style.cursor='pointer'});
+    map.on('mouseleave','fleet-devices-points',()=>{map.getCanvas().style.cursor=''});
+    map.on('click','fleet-devices-points',(event)=>{const id=Number(event.features?.[0]?.properties?.id);const device=fleetDevices.find(item=>item.id===id);if(device)chooseDevice(device)});
+  }
   function addContextMarkers(map:MapLibreMap){
     for(const marker of contextMarkers)marker.remove();contextMarkers=[];
     const add=(lng:number,lat:number,name:string,kind:'area'|'facility')=>{const el=document.createElement('div');el.className=`forestry-label ${kind}`;el.textContent=name;contextMarkers.push(new Marker({element:el,anchor:kind==='facility'?'top':'center'}).setLngLat([lng,lat]).addTo(map))};
@@ -127,7 +138,7 @@
     const map=new MapLibreMap({container:mapContainer,style:forestryStyle(),bounds:FORESTRY_BOUNDS,fitBoundsOptions:{padding:24},attributionControl:false,maxBounds:FORESTRY_BOUNDS});
     map.addControl(new NavigationControl({showCompass:true}),'top-right');
     map.on('error',(event)=>{console.error('Live map error',event.error);message='Live map context failed to load'});
-    map.on('load',()=>{addContextMarkers(map);map.resize();map.fitBounds(FORESTRY_BOUNDS,{padding:36,duration:0});if(selected)animateMarker(selected)});
+    map.on('load',()=>{addContextMarkers(map);installFleetLayer(map);map.resize();map.fitBounds(FORESTRY_BOUNDS,{padding:36,duration:0});if(selected)animateMarker(selected)});
     map.on('click',(event)=>{if(!selected)return;const control=controlFor(selected);if(control.mode!=='target')return;setControl(selected,{target:{latitude:event.lngLat.lat,longitude:event.lngLat.lng},heading:headingBetween([selected.longitude,selected.latitude],[event.lngLat.lng,event.lngLat.lat]),preset:undefined});message=`Target set for ${selected.name}`});
     liveMap=map;
   }
@@ -161,8 +172,11 @@
     try{
       const hr=await fetch('/healthz'); health=await hr.json();
       if(!health?.database_ready){message='Database is not ready';return}
-      const r=await apiFetch('/api/devices?limit=50'); if(!r.ok) throw new Error('Unable to load devices');
-      const p=await r.json(); devices=p.items??[]; syncSelected(); if(!selected&&devices.length) selected=devices[0]; message='Simulator ready'; await loadSimulationState(selected);
+      const [r,fleetResponse]=await Promise.all([apiFetch('/api/devices?limit=50'),apiFetch('/api/devices')]);
+      if(!r.ok||!fleetResponse.ok) throw new Error('Unable to load devices');
+      const [p,fleetPayload]=await Promise.all([r.json(),fleetResponse.json()]);
+      devices=p.items??[]; fleetDevices=Array.isArray(fleetPayload)?fleetPayload:(fleetPayload.items??[]);
+      syncSelected(); if(!selected&&devices.length) selected=devices[0]; syncFleetMap(); message='Simulator ready'; await loadSimulationState(selected);
 
     }catch(e){message=e instanceof Error?e.message:'Connection failed'}finally{refreshing=false}
   }
@@ -305,7 +319,7 @@
           {/if}
           <div class="map-controls simulator-controls"><button class:control-active={showMapLayer} aria-label="Toggle map context layer" title="Toggle map context layer" onclick={toggleContextLayer}>▱</button><button aria-label={t('fullscreen')} title={t('fullscreen')} onclick={()=>void toggleMapFullscreen()}>⌗</button></div>
           <div class="map-legend"><span><i class="legend-operating"></i> {t('estateBoundary')}</span><span><i class="legend-trail"></i> {t('liveTrail')}</span><span><i class="legend-device"></i> {t('device')}</span><em>{t('offlineWorld')}</em></div>
-          <div class="map-runtime"><i class:ok={health?.database_ready}></i>{health?.database_ready?t('runtimeReady'):t('runtimeUnavailable')}<span>·</span><span>{t('telemetrySmooth')}</span></div>
+          <div class="map-runtime"><i class:ok={health?.database_ready}></i>{health?.database_ready?t('runtimeReady'):t('runtimeUnavailable')}<span>·</span><span>{fleetDevices.length.toLocaleString()} {language==='id'?'perangkat runtime':'runtime devices'}</span><span>·</span><span>{t('telemetrySmooth')}</span></div>
         </div>
       </section>
     </main>{:else if view==='security'}<main class="settings-main"><header><h1>{language==='id'?'Keamanan':'Security'}</h1><p class="subtitle">{language==='id'?'Kata sandi, autentikasi dua faktor, dan sesi login Anda.':'Your password, two-factor authentication and the places you are signed in.'}</p></header><section class="settings-card"><h2>{language==='id'?'Autentikasi dua faktor':'Two-factor authentication'}</h2><p>{language==='id'?'Kode dari aplikasi autentikator melindungi setiap proses masuk.':'A code from your authenticator app protects every sign-in.'}</p><div class="setting-row"><span class:green={user.mfa_enabled}>{user.mfa_enabled?(language==='id'?'● Nyala':'● On'):(language==='id'?'○ Mati':'○ Off')}</span><button class="ghost" disabled={user.mfa_enabled} onclick={()=>void setupMFA()}>{language==='id'?'Atur':'Set up'}</button><button class="ghost" disabled={!user.mfa_enabled} onclick={()=>void regenerateRecovery()}>{language==='id'?'Buat ulang kode pemulihan':'Regenerate recovery codes'}</button><button class="danger" disabled title="MFA is required for simulator accounts">{language==='id'?'Matikan':'Turn off'}</button></div>{#if mfaSetup}<div class="mfa-box"><strong>{language==='id'?'Pindai dengan autentikator':'Scan with your authenticator'}</strong><div class="qr-wrap">{#if mfaQR}<img src={mfaQR} alt="Authenticator QR code" />{/if}<div><small>{language==='id'?'Tidak bisa memindai? Masukkan kunci pengaturan ini:':"Can't scan it? Enter this setup key:"}</small><code>{mfaSetup.secret}</code></div></div><small>{language==='id'?'Masukkan kode 6 digit yang dibuat autentikator.':'Enter the 6-digit code generated by your authenticator.'}</small><input bind:value={mfaCode} inputmode="numeric" maxlength="6" placeholder="123456" />{#if setupError}<div class="auth-error">{setupError}</div>{/if}<button class="primary" onclick={()=>void enableMFA()}>{language==='id'?'Aktifkan MFA':'Enable MFA'}</button></div>{/if}{#if recovery.length}<div class="mfa-box"><strong>{language==='id'?'Kode pemulihan — simpan sekarang':'Recovery codes — save these now'}</strong><code>{recovery.join('  ')}</code></div>{/if}</section><section class="settings-card"><h2>{language==='id'?'Kata sandi':'Password'}</h2><label>{language==='id'?'Kata sandi saat ini':'Current password'}<input type="password" bind:value={currentPassword}/></label><label>{language==='id'?'Kata sandi baru':'New password'}<input type="password" bind:value={newPassword}/><small>{language==='id'?'Minimal 12 karakter.':'At least 12 characters.'}</small></label><label>{language==='id'?'Ulangi kata sandi baru':'Repeat new password'}<input type="password" bind:value={repeatPassword}/></label><button class="primary" onclick={()=>void changePassword()}>{language==='id'?'Ubah kata sandi':'Change password'}</button></section><section class="settings-card"><h2>{language==='id'?'Tempat Anda masuk':'Where you are signed in'}</h2>{#each sessions as s}<div class="session-row"><div><strong>{s.user_agent||'API tool'}</strong><small>{s.ip_address} · active {new Date(s.last_seen_at).toLocaleString()}</small></div><span>{new Date(s.expires_at).toLocaleString()} <button class="ghost mini" onclick={()=>void revokeSession(s.id)}>{language==='id'?'Cabut':'Revoke'}</button></span></div>{/each}</section></main>{:else}<main class="settings-main"><header><h1>{t('usersRoles')}</h1><p class="subtitle">{language==='id'?'Akun yang diizinkan mengoperasikan simulator ini.':'Accounts allowed to operate this simulator.'}</p></header><section class="settings-card"><h2>{language==='id'?'Tambah pengguna':'Add user'}</h2><div class="user-create"><input bind:value={newUserName} placeholder={language==='id'?'Nama tampilan':'Display name'}/><input bind:value={newUserEmail} placeholder="Email"/><select bind:value={newUserRole}><option value="operator">Operator</option><option value="viewer">Viewer</option><option value="administrator">Administrator</option></select><input type="password" bind:value={newUserPassword} placeholder={language==='id'?'Kata sandi sementara (12+ karakter)':'Temporary password (12+ characters)'}/><button class="primary" onclick={()=>void createUser()}>{language==='id'?'Buat pengguna':'Create user'}</button></div></section><section class="settings-card"><div class="user-table"><div class="table-head"><span>{language==='id'?'Pengguna':'User'}</span><span>{language==='id'?'Peran':'Role'}</span><span>MFA</span></div>{#each users as u}<div class="table-row"><span><strong>{u.display_name}</strong><small>{u.email}</small></span><span>{u.role}</span><span class:green={u.mfa_enabled}>{u.mfa_enabled?(language==='id'?'Nyala':'On'):(language==='id'?'Mati':'Off')}</span></div>{/each}</div></section></main>{/if}
