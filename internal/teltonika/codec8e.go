@@ -41,18 +41,36 @@ func EncodeCodec8Extended(record Record) ([]byte, error) {
 	data = append(data, 10) // deterministic demo satellite count
 	data = appendU16(data, uint16(math.Round(record.Speed)))
 
-	// Codec 8 Extended IO element. AVL ID 239 is the ignition flag.
-	data = appendU16(data, 239) // event IO ID
-	data = appendU16(data, 1)   // total IO elements
-	data = appendU16(data, 1)   // one-byte IO count
+	// Common FMC920 IO elements used by Hexa.Sensor integration tests.
+	data = appendU16(data, 239) // event IO ID: ignition
+	data = appendU16(data, 6)   // total IO elements
+	data = appendU16(data, 4)   // one-byte IO count
+	data = appendU16(data, 21)
+	data = append(data, 5) // GSM signal
+	data = appendU16(data, 1)
+	if record.Ignition {
+		data = append(data, 1)
+	} else {
+		data = append(data, 0)
+	} // DIN1
+	data = appendU16(data, 240)
+	if record.Speed > 0 {
+		data = append(data, 1)
+	} else {
+		data = append(data, 0)
+	} // movement
 	data = appendU16(data, 239)
 	if record.Ignition {
 		data = append(data, 1)
 	} else {
 		data = append(data, 0)
-	}
-	data = appendU16(data, 0) // two-byte IO count
-	data = appendU16(data, 0) // four-byte IO count
+	} // ignition
+	data = appendU16(data, 1) // two-byte IO count
+	data = appendU16(data, 66)
+	data = appendU16(data, 24000) // external voltage, mV
+	data = appendU16(data, 1)     // four-byte IO count
+	data = appendU16(data, 16)
+	data = appendU32(data, 0) // odometer placeholder
 	data = appendU16(data, 0) // eight-byte IO count
 	data = appendU16(data, 0) // variable-size IO count
 	data = append(data, 0x01) // number of records, repeated
@@ -107,5 +125,11 @@ func appendU64(dst []byte, value uint64) []byte {
 func appendI32(dst []byte, value int32) []byte {
 	var b [4]byte
 	binary.BigEndian.PutUint32(b[:], uint32(value))
+	return append(dst, b[:]...)
+}
+
+func appendU32(dst []byte, value uint32) []byte {
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], value)
 	return append(dst, b[:]...)
 }

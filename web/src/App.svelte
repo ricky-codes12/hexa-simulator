@@ -65,7 +65,7 @@
   let mapStage:HTMLDivElement|null=$state(null), mapContainer:HTMLDivElement|null=$state(null);
   let liveMap:MapLibreMap|null=null, liveMarker:Marker|null=null, contextMarkers:Marker[]=[] , animationFrame=0;
   let renderedPosition:{lng:number;lat:number;heading:number}|null=null, trailByDevice=new Map<number,[number,number][]>();
-  let timers=new Map<number,ReturnType<typeof setInterval>>(), routeSteps=new Map<number,number>();
+  let routeSteps=new Map<number,number>();
   let driveControls=$state(new Map<number,DriveControl>());
   let targetMarker:Marker|null=null, refreshing=$state(false);
 
@@ -74,7 +74,8 @@
     const existing=driveControls.get(device.id);if(existing)return existing;
     const created:DriveControl={mode:'auto',speed:Math.max(30,Math.round(device.speed)||40),heading:device.heading||0};driveControls.set(device.id,created);return created;
   }
-  function setControl(device:Device,patch:Partial<DriveControl>){const next={...controlFor(device),...patch};driveControls.set(device.id,next);driveControls=new Map(driveControls);syncTargetMarker()}
+  function setControl(device:Device,patch:Partial<DriveControl>){const next={...controlFor(device),...patch};driveControls.set(device.id,next);driveControls=new Map(driveControls);syncTargetMarker();void syncRuntimeControl(device,next)}
+  async function syncRuntimeControl(device:Device,c:DriveControl){const payload:any={action:'control',mode:c.mode,speed:c.speed,heading:c.heading,preset:c.preset||''};if(c.target){payload.target_latitude=c.target.latitude;payload.target_longitude=c.target.longitude}const r=await apiFetch(`/api/devices/${device.id}/simulation`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});if(!r.ok)message='Runtime control update failed'}
   function destinationPoint(latitude:number,longitude:number,heading:number,speed:number,seconds=3){
     const distance=speed*1000/3600*seconds,rad=heading*Math.PI/180,latRad=latitude*Math.PI/180;
     return {latitude:latitude+(distance*Math.cos(rad))/111320,longitude:longitude+(distance*Math.sin(rad))/(111320*Math.max(.2,Math.cos(latRad))),speed,heading:(heading+360)%360};
@@ -146,7 +147,7 @@
       if(!health?.database_ready){message='Database is not ready';return}
       const r=await apiFetch('/api/devices?limit=50'); if(!r.ok) throw new Error('Unable to load devices');
       const p=await r.json(); devices=p.items??[]; syncSelected(); if(!selected&&devices.length) selected=devices[0]; message='Simulator ready';
-      for(const device of devices) if(device.status==='online'&&!timers.has(device.id)&&!controlFor(device).paused) resume(device);
+
     }catch(e){message=e instanceof Error?e.message:'Connection failed'}finally{refreshing=false}
   }
   async function addDevice(){
@@ -157,24 +158,13 @@
       name='';imei='';showAdd=false;await refresh();
     }catch(e){message=e instanceof Error?e.message:'Unable to create device'}finally{saving=false}
   }
-  async function sendTelemetry(device:Device,status:'online'|'offline'){
-    const point=status==='online'?nextPoint(device):{latitude:device.latitude,longitude:device.longitude,speed:0,heading:device.heading};
-    const payload={status,...point,ignition:status==='online'};
-    const r=await apiFetch(`/api/devices/${device.id}/telemetry`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});
-    if(!r.ok) throw new Error('Telemetry update failed');
-    const updated:Device=await r.json(); devices=devices.map(d=>d.id===updated.id?updated:d); syncSelected();
+  async function runtimeAction(device:Device,action:'start'|'resume'|'pause'|'stop') {
+    const c=controlFor(device);const payload:any={action,mode:c.mode,speed:c.speed,heading:c.heading,preset:c.preset||''};if(c.target){payload.target_latitude=c.target.latitude;payload.target_longitude=c.target.longitude}
+    const r=await apiFetch(`/api/devices/${device.id}/simulation`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});if(!r.ok)throw new Error(await r.text()||'Runtime action failed');
+    setControl(device,{paused:action==='pause'});await refresh();
   }
-  function resume(device:Device){
-    if(timers.has(device.id))return;setControl(device,{paused:false});
-    const timer=setInterval(()=>{ const current=devices.find(d=>d.id===device.id); if(current) void sendTelemetry(current,'online').catch(()=>{message=`Telemetry failed for ${current.name}`}) },3000);
-    timers.set(device.id,timer);
-  }
-  async function start(device:Device){
-    if(timers.has(device.id))return;setControl(device,{paused:false});
-    try{ await sendTelemetry(device,'online'); const current=devices.find(d=>d.id===device.id); if(current)resume(current); message=`${device.name} is transmitting`; }
-    catch(e){message=e instanceof Error?e.message:'Unable to start simulation'}
-  }
-  function pause(device:Device){const timer=timers.get(device.id);if(timer)clearInterval(timer);timers.delete(device.id);setControl(device,{paused:true});message=`${device.name} paused`; }
+  async function start(device:Device){try{await runtimeAction(device,device.status==='online'?'resume':'start');message=`${device.name} is transmitting from server runtime`}catch(e){message=e instanceof Error?e.message:'Unable to start simulation'}}
+  function pause(device:Device){void runtimeAction(device,'pause').then(()=>message=`${device.name} paused`).catch(e=>message=e instanceof Error?e.message:'Unable to pause simulation')}
   function setMode(device:Device,mode:DriveMode){setControl(device,{mode,target:mode==='target'?controlFor(device).target:undefined,preset:undefined,heading:device.heading});message=mode==='target'?'Click the map to choose a destination':`${device.name} switched to ${mode} drive`;}
   function setSpeed(device:Device,value:number){setControl(device,{speed:Math.min(180,Math.max(0,Math.round(value))),preset:undefined})}
   function turn(device:Device,delta:number){const c=controlFor(device);setControl(device,{mode:'manual',heading:(c.heading+delta+360)%360,target:undefined,preset:undefined})}
@@ -184,10 +174,7 @@
     if(preset==='drift'){setControl(device,{mode:'manual',speed:55,heading:(device.heading+55)%360,target:undefined,preset:'drift'});message=`${device.name} drift / route deviation active`;return}
     const target={latitude:-3.032,longitude:104.892};setControl(device,{mode:'target',speed:65,heading:headingBetween([device.longitude,device.latitude],[target.longitude,target.latitude]),target,preset:'exit'});message=`${device.name} is heading outside the operating estate`;
   }
-  async function stop(device:Device){
-    const timer=timers.get(device.id); if(timer)clearInterval(timer); timers.delete(device.id);
-    try{await sendTelemetry(device,'offline');message=`${device.name} stopped`;}catch(e){message=e instanceof Error?e.message:'Unable to stop simulation'}
-  }
+  async function stop(device:Device){try{await runtimeAction(device,'stop');message=`${device.name} stopped`}catch(e){message=e instanceof Error?e.message:'Unable to stop simulation'}}
   function downloadSensorOnboarding(device:Device){
     void (async()=>{const r=await apiFetch(`/api/devices/${device.id}/sensor-onboarding.zip`);if(!r.ok){message='Sensor CSV download failed';return};const blob=await r.blob();const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`hexa-sensor-onboarding-${device.name.toLowerCase().replace(/[^a-z0-9]+/g,'-')}.zip`;a.click();URL.revokeObjectURL(a.href)})();
     message=`Hexa.Sensor onboarding CSV package downloaded for ${device.name}`;
@@ -196,11 +183,11 @@
     if(device.status==='online') await stop(device);
     if(!confirm(`Delete ${device.name}? This removes the virtual device from the simulator.`))return;
     const r=await apiFetch(`/api/devices/${device.id}`,{method:'DELETE'}); if(!r.ok){message='Unable to delete device';return}
-    timers.delete(device.id);routeSteps.delete(device.id);driveControls.delete(device.id);selected=null;syncTargetMarker();await refresh();message=`${device.name} deleted`;
+    routeSteps.delete(device.id);driveControls.delete(device.id);selected=null;syncTargetMarker();await refresh();message=`${device.name} deleted`;
   }
   $effect(()=>{if(mapContainer){ensureMap();syncMapDevice(selected)}});
   $effect(()=>{if(selected)syncMapDevice(selected)});
-  $effect(()=>{void loadMe().then(()=>{if(user?.mfa_enabled)void refresh()}); return()=>{for(const timer of timers.values())clearInterval(timer);cancelAnimationFrame(animationFrame);for(const marker of contextMarkers)marker.remove();contextMarkers=[];liveMap?.remove();liveMap=null;liveMarker=null}});
+  $effect(()=>{let poll:ReturnType<typeof setInterval>|undefined;void loadMe().then(()=>{if(user?.mfa_enabled){void refresh();poll=setInterval(()=>void refresh(),3000)}}); return()=>{if(poll)clearInterval(poll);cancelAnimationFrame(animationFrame);for(const marker of contextMarkers)marker.remove();contextMarkers=[];liveMap?.remove();liveMap=null;liveMarker=null}});
 </script>
 
 {#if !authChecked}<div class="auth-screen"><div class="auth-loading"><div class="login-brand">Hexa.Simulator</div><p>{language==='id'?'Memeriksa sesi aman…':'Checking secure session…'}</p></div></div>{:else if !user || authStep==='setup' || authStep==='recovery'}<div class="auth-screen auth-layout"><section class="auth-hero"><div class="auth-brand"><span class="auth-logo">H+</span><strong>Hexa.Simulator</strong></div><div class="auth-hero-copy"><span class="eyebrow">{language==='id'?'Telemetri virtual. Keyakinan integrasi nyata.':'Virtual telemetry. Real integration confidence.'}</span><h1>{authStep==='setup'?'Secure your simulator.':authStep==='recovery'?'Keep a safe way back in.':authStep==='mfa'?'A second check. A safer workspace.':'Simulate every signal before it reaches the field.'}</h1><p>{authStep==='setup'?'Connect an authenticator app before entering your workspace.':authStep==='recovery'?'Save your recovery codes somewhere secure before continuing.':'Create virtual GPS devices, stream deterministic telemetry and validate Hexa.Sensor integrations from one workspace.'}</p><div class="signal-orbit"><span>{t('devices')}</span><span>{language==='id'?'Telemetri':'Telemetry'}</span><span>{language==='id'?'Push Sensor':'Sensor push'}</span><i></i></div></div><small>Hexa.Simulator · {language==='id'?'Ruang kerja aman':'Secure workspace'}</small></section><section class="auth-panel"><div class="auth-card"><div class="auth-language"><button class:active={language==='id'} onclick={()=>{if(language!=='id')toggleLanguage()}}><span class="flag-wave">🇮🇩</span> ID</button><button class:active={language==='en'} onclick={()=>{if(language!=='en')toggleLanguage()}}><span class="flag-wave delay">🇬🇧</span> EN</button></div>{#if authStep==='password'}<span class="eyebrow">{language==='id'?'Selamat datang di ruang kerja Anda':'Welcome to your workspace'}</span><h2>{language==='id'?'Masuk':'Sign in'}</h2><p>{language==='id'?'Masukkan akun administrator untuk melanjutkan.':'Enter your administrator account details to continue.'}</p><form onsubmit={(e)=>{e.preventDefault();void login()}}><label>Email<input bind:value={loginEmail} autocomplete="username" /></label><label>{language==='id'?'Kata sandi':'Password'}<input type="password" bind:value={loginPassword} autocomplete="current-password" /></label>{#if authError}<div class="auth-error">{authError}</div>{/if}<button class="primary auth-submit">{language==='id'?'Lanjutkan':'Continue'}</button></form>{:else if authStep==='mfa'}<span class="eyebrow">{language==='id'?'Pemeriksaan identitas · Langkah 2 dari 2':'Identity check · Step 2 of 2'}</span><h2>{language==='id'?'Verifikasi dua faktor':'Two-factor verification'}</h2><p>{language==='id'?'Masukkan kode 6 digit dari aplikasi autentikator atau gunakan kode pemulihan.':'Enter the 6-digit code from your authenticator app, or use a recovery code.'}</p><form onsubmit={(e)=>{e.preventDefault();void login()}}><label>{language==='id'?'Kode autentikasi':'Authentication code'}<input class="code-input" bind:value={loginCode} autocomplete="one-time-code" inputmode="numeric" maxlength="32" placeholder="000000" autofocus /></label>{#if authError}<div class="auth-error">{authError}</div>{/if}<button class="primary auth-submit">{language==='id'?'Verifikasi':'Verify'}</button><button type="button" class="auth-link" onclick={()=>void backToPassword()}>{language==='id'?'Masuk dengan akun lain':'Sign in as someone else'}</button></form>{:else if authStep==='setup'}<span class="eyebrow">{language==='id'?'Pengaturan autentikator · Wajib':'Authenticator setup · Required'}</span><h2>{language==='id'?'Pindai kode QR Anda':'Scan your QR code'}</h2><p>{language==='id'?'Pindai kode ini dengan Google Authenticator, Microsoft Authenticator, 2FAS, atau aplikasi TOTP lain.':'Scan this code with Google Authenticator, Microsoft Authenticator, 2FAS, or another TOTP app.'}</p>{#if mfaSetup}<div class="qr-wrap">{#if mfaQR}<img src={mfaQR} alt="Authenticator QR code" />{/if}<div><small>{language==='id'?'Tidak bisa memindai? Masukkan kunci pengaturan ini:':"Can't scan it? Enter this setup key:"}</small><code>{mfaSetup.secret}</code></div></div><form onsubmit={(e)=>{e.preventDefault();void enableMFA()}}><label>{language==='id'?'Kode autentikasi 6 digit':'6-digit authentication code'}<input class="code-input" bind:value={mfaCode} autocomplete="one-time-code" inputmode="numeric" maxlength="6" placeholder="000000" /></label>{#if setupError}<div class="auth-error">{setupError}</div>{/if}<button class="primary auth-submit">{language==='id'?'Verifikasi dan aktifkan MFA':'Verify and enable MFA'}</button></form>{:else}<p>{language==='id'?'Menyiapkan kode QR aman…':'Preparing secure QR code…'}</p>{/if}{:else}<span class="eyebrow">{language==='id'?'MFA aktif':'MFA enabled'}</span><h2>{language==='id'?'Simpan kode pemulihan Anda':'Save your recovery codes'}</h2><p>{language==='id'?'Setiap kode dapat digunakan sekali jika autentikator tidak tersedia.':'Each code can be used once if your authenticator is unavailable.'}</p><div class="recovery-grid">{#each recovery as code}<code>{code}</code>{/each}</div><button class="primary auth-submit" onclick={()=>{authStep='password';loginPassword='';void refresh()}}>{language==='id'?'Lanjut ke Simulator':'Continue to Simulator'}</button>{/if}</div><div class="platform-ready"><span>●</span> {language==='id'?'Platform siap':'Platform ready'}</div></section></div>{:else}<div class="shell">

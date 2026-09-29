@@ -69,6 +69,10 @@ type healthResponse struct {
 }
 
 func Handler(revision string, store DeviceStore, webRoot string, forwarders ...TelemetryForwarder) http.Handler {
+	return HandlerWithRuntime(revision, store, webRoot, nil, forwarders...)
+}
+
+func HandlerWithRuntime(revision string, store DeviceStore, webRoot string, runtime *SimulationRuntime, forwarders ...TelemetryForwarder) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(writer http.ResponseWriter, request *http.Request) {
 		ready := false
@@ -138,6 +142,40 @@ func Handler(revision string, store DeviceStore, webRoot string, forwarders ...T
 			items = items[offset:end]
 		}
 		writeJSON(writer, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset})
+	})
+	mux.HandleFunc("GET /api/devices/{id}/simulation", func(writer http.ResponseWriter, request *http.Request) {
+		if runtime == nil {
+			writeError(writer, http.StatusServiceUnavailable, "server-side simulation runtime is unavailable")
+			return
+		}
+		var id int64
+		if _, err := fmtSscan(request.PathValue("id"), &id); err != nil || id < 1 {
+			writeError(writer, http.StatusBadRequest, "invalid device id")
+			return
+		}
+		writeJSON(writer, http.StatusOK, runtime.State(id))
+	})
+	mux.HandleFunc("POST /api/devices/{id}/simulation", func(writer http.ResponseWriter, request *http.Request) {
+		if runtime == nil {
+			writeError(writer, http.StatusServiceUnavailable, "server-side simulation runtime is unavailable")
+			return
+		}
+		var id int64
+		if _, err := fmtSscan(request.PathValue("id"), &id); err != nil || id < 1 {
+			writeError(writer, http.StatusBadRequest, "invalid device id")
+			return
+		}
+		var input SimulationControl
+		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+			writeError(writer, http.StatusBadRequest, "invalid simulation payload")
+			return
+		}
+		state, err := runtime.Apply(id, input)
+		if err != nil {
+			writeError(writer, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(writer, http.StatusOK, state)
 	})
 	mux.HandleFunc("POST /api/devices", func(writer http.ResponseWriter, request *http.Request) {
 		if store == nil {

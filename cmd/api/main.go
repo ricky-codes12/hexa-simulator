@@ -11,6 +11,7 @@ import (
 	"time"
 
 	apphttp "hexa-simulator/internal/httpapi"
+	"hexa-simulator/internal/mqttout"
 	"hexa-simulator/internal/postgresstore"
 	"hexa-simulator/internal/sensorpush"
 	"hexa-simulator/internal/teltonika"
@@ -69,7 +70,9 @@ func serve() {
 	pushKey := os.Getenv("SIM_SENSOR_PUSH_KEY")
 	var forwarders []apphttp.TelemetryForwarder
 	if gatewayAddress != "" {
-		forwarders = append(forwarders, teltonikaForwarder{client: teltonika.Client{Address: gatewayAddress, Timeout: gatewayTimeout()}})
+		tcpClient := &teltonika.Client{Address: gatewayAddress, Timeout: gatewayTimeout(), Codec: os.Getenv("TELTONIKA_CODEC")}
+		defer tcpClient.Close()
+		forwarders = append(forwarders, teltonikaForwarder{client: tcpClient})
 	}
 	if pushURL != "" || pushKey != "" {
 		if pushURL == "" || pushKey == "" {
@@ -78,9 +81,23 @@ func serve() {
 		}
 		forwarders = append(forwarders, sensorPushForwarder{client: sensorpush.Client{URL: pushURL, Key: pushKey, Timeout: sensorPushTimeout()}})
 	}
+	var mqttClient *mqttout.Client
+	if mqttURL := os.Getenv("SIM_MQTT_URL"); mqttURL != "" {
+		topic := os.Getenv("SIM_MQTT_TOPIC")
+		if topic == "" {
+			topic = "{imei}/data"
+		}
+		mqttClient = &mqttout.Client{URL: mqttURL, Topic: topic, Timeout: mqttTimeout()}
+		defer mqttClient.Close()
+		forwarders = append(forwarders, mqttForwarder{client: mqttClient})
+	}
+	var runtime *apphttp.SimulationRuntime
+	if store != nil {
+		runtime = apphttp.NewSimulationRuntime(ctx, store, 3*time.Second, forwarders...)
+	}
 	server := &http.Server{
 		Addr:              address,
-		Handler:           apphttp.SecureHandler(revision, store, authStore, os.Getenv("WEB_ROOT"), forwarders...),
+		Handler:           apphttp.SecureHandlerWithRuntime(revision, store, authStore, os.Getenv("WEB_ROOT"), runtime, forwarders...),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {
@@ -114,7 +131,7 @@ func health(args []string) {
 	fmt.Println("healthy")
 }
 
-type teltonikaForwarder struct{ client teltonika.Client }
+type teltonikaForwarder struct{ client *teltonika.Client }
 
 func (f teltonikaForwarder) ForwardTelemetry(ctx context.Context, device apphttp.Device) error {
 	return f.client.Send(ctx, teltonika.Telemetry{
@@ -153,6 +170,24 @@ func sensorPushTimeout() time.Duration {
 	timeout, err := time.ParseDuration(value)
 	if err != nil || timeout <= 0 {
 		fmt.Fprintf(os.Stderr, "invalid SIM_SENSOR_PUSH_TIMEOUT %q; using 5s\n", value)
+		return 5 * time.Second
+	}
+	return timeout
+}
+
+type mqttForwarder struct{ client *mqttout.Client }
+
+func (f mqttForwarder) ForwardTelemetry(ctx context.Context, device apphttp.Device) error {
+	return f.client.Publish(ctx, mqttout.Telemetry{HardwareID: device.IMEI, DeviceTime: device.UpdatedAt, Latitude: device.Latitude, Longitude: device.Longitude, Speed: device.Speed, Heading: device.Heading, Ignition: device.Ignition, Movement: device.Speed > 0})
+}
+func mqttTimeout() time.Duration {
+	value := os.Getenv("SIM_MQTT_TIMEOUT")
+	if value == "" {
+		return 5 * time.Second
+	}
+	timeout, err := time.ParseDuration(value)
+	if err != nil || timeout <= 0 {
+		fmt.Fprintf(os.Stderr, "invalid SIM_MQTT_TIMEOUT %q; using 5s\n", value)
 		return 5 * time.Second
 	}
 	return timeout

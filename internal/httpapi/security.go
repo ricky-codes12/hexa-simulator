@@ -65,7 +65,10 @@ type authContext struct {
 }
 
 func SecureHandler(revision string, store DeviceStore, auth AuthStore, webRoot string, forwarders ...TelemetryForwarder) http.Handler {
-	core := Handler(revision, store, webRoot, forwarders...)
+	return SecureHandlerWithRuntime(revision, store, auth, webRoot, nil, forwarders...)
+}
+func SecureHandlerWithRuntime(revision string, store DeviceStore, auth AuthStore, webRoot string, runtime *SimulationRuntime, forwarders ...TelemetryForwarder) http.Handler {
+	core := HandlerWithRuntime(revision, store, webRoot, runtime, forwarders...)
 	if auth == nil {
 		return core
 	}
