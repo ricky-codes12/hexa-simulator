@@ -128,6 +128,40 @@ func TestStartFleetRunsEveryDeviceWithoutBrowser(t *testing.T) {
 	}
 }
 
+func TestFleetAutoRoutesSpreadDevicesDeterministically(t *testing.T) {
+	routes := map[int]bool{}
+	speeds := map[float64]bool{}
+	directions := map[int]bool{}
+	positions := map[string]bool{}
+	for id := int64(1); id <= 350; id++ {
+		state := SimulationState{}
+		prepareAutoRoute(&state, id, -3.0, 104.78)
+		routes[state.routeIndex] = true
+		speeds[fleetSpeed(id)] = true
+		directions[state.routeDirection] = true
+		lat, lon, _ := moveOnAutoRoute(&state, -3.0, 104.78, fleetSpeed(id), 3)
+		if lat == -3.0 && lon == 104.78 {
+			t.Fatalf("device %d did not move", id)
+		}
+		if lat < -3.04 || lat > -2.93 || lon < 104.69 || lon > 104.91 {
+			t.Fatalf("device %d seeded outside forestry map: %f,%f", id, lat, lon)
+		}
+		positions[fmt.Sprintf("%.6f,%.6f", lat, lon)] = true
+	}
+	if len(routes) != len(forestryRoutes) {
+		t.Fatalf("used routes=%d want %d", len(routes), len(forestryRoutes))
+	}
+	if len(speeds) < 20 {
+		t.Fatalf("fleet speed variants=%d want at least 20", len(speeds))
+	}
+	if !directions[-1] || !directions[1] {
+		t.Fatalf("route directions=%v want both directions", directions)
+	}
+	if len(positions) < 300 {
+		t.Fatalf("unique fleet positions=%d want at least 300", len(positions))
+	}
+}
+
 type blockingForwarder struct {
 	release <-chan struct{}
 }

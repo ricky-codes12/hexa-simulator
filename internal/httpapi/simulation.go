@@ -31,18 +31,33 @@ type NamedTelemetryForwarder interface {
 }
 
 type SimulationState struct {
-	DeviceID        int64                  `json:"device_id"`
-	Running         bool                   `json:"running"`
-	Paused          bool                   `json:"paused"`
-	Mode            string                 `json:"mode"`
-	Speed           float64                `json:"speed"`
-	Heading         float64                `json:"heading"`
-	TargetLatitude  *float64               `json:"target_latitude,omitempty"`
-	TargetLongitude *float64               `json:"target_longitude,omitempty"`
-	Preset          string                 `json:"preset,omitempty"`
-	LastTick        time.Time              `json:"last_tick,omitempty"`
-	LastError       string                 `json:"last_error,omitempty"`
-	Outputs         map[string]OutputState `json:"outputs,omitempty"`
+	DeviceID         int64                  `json:"device_id"`
+	Running          bool                   `json:"running"`
+	Paused           bool                   `json:"paused"`
+	Mode             string                 `json:"mode"`
+	Speed            float64                `json:"speed"`
+	Heading          float64                `json:"heading"`
+	TargetLatitude   *float64               `json:"target_latitude,omitempty"`
+	TargetLongitude  *float64               `json:"target_longitude,omitempty"`
+	Preset           string                 `json:"preset,omitempty"`
+	LastTick         time.Time              `json:"last_tick,omitempty"`
+	LastError        string                 `json:"last_error,omitempty"`
+	Outputs          map[string]OutputState `json:"outputs,omitempty"`
+	routeIndex       int
+	waypointIndex    int
+	routeDirection   int
+	routeReady       bool
+	routeSeedPending bool
+}
+
+type routeCoordinate struct{ latitude, longitude float64 }
+
+var forestryRoutes = [][]routeCoordinate{
+	{{-2.991, 104.701}, {-2.990, 104.730}, {-2.991, 104.758}, {-2.990, 104.784}, {-2.990, 104.812}, {-2.991, 104.842}, {-2.991, 104.875}, {-2.988, 104.898}},
+	{{-3.016, 104.747}, {-3.006, 104.759}, {-2.998, 104.771}, {-2.990, 104.784}, {-2.978, 104.793}, {-2.967, 104.806}, {-2.962, 104.821}, {-2.964, 104.838}},
+	{{-2.990, 104.784}, {-2.974, 104.772}, {-2.958, 104.762}, {-2.947, 104.746}},
+	{{-2.990, 104.812}, {-3.006, 104.808}, {-3.019, 104.819}, {-3.027, 104.845}},
+	{{-2.991, 104.875}, {-3.005, 104.882}, {-3.011, 104.895}},
 }
 
 type TransmissionLog struct {
@@ -207,11 +222,9 @@ func (r *SimulationRuntime) StartFleet() (int, error) {
 		d := items[i]
 		s := r.states[d.ID]
 		if s == nil {
-			speed := d.Speed
-			if speed <= 0 {
-				speed = 40
-			}
+			speed := fleetSpeed(d.ID)
 			s = &SimulationState{DeviceID: d.ID, Running: true, Mode: "auto", Speed: speed, Heading: d.Heading, Outputs: r.configuredOutputs()}
+			prepareAutoRoute(s, d.ID, d.Latitude, d.Longitude)
 			r.states[d.ID] = s
 		} else {
 			s.Running = true
@@ -302,6 +315,7 @@ func (r *SimulationRuntime) Apply(id int64, in SimulationControl) (SimulationSta
 	s := r.states[id]
 	if s == nil {
 		s = &SimulationState{DeviceID: id, Mode: "auto", Speed: 40, Heading: d.Heading, Outputs: r.configuredOutputs()}
+		prepareAutoRoute(s, id, d.Latitude, d.Longitude)
 		r.states[id] = s
 	}
 	if in.Mode != "" {
@@ -392,14 +406,16 @@ func (r *SimulationRuntime) tickOnce(id int64) error {
 		lon = 104.785
 	}
 	if state.Mode == "auto" {
-		heading = autoHeading(id, d.UpdatedAt)
+		prepareAutoRoute(&state, id, lat, lon)
+		lat, lon, heading = moveOnAutoRoute(&state, lat, lon, state.Speed, r.interval.Seconds())
 		state.Heading = heading
-	}
-	if state.Mode == "target" && state.TargetLatitude != nil && state.TargetLongitude != nil {
+	} else if state.Mode == "target" && state.TargetLatitude != nil && state.TargetLongitude != nil {
 		heading = bearing(lat, lon, *state.TargetLatitude, *state.TargetLongitude)
 		state.Heading = heading
+		lat, lon = move(lat, lon, heading, state.Speed, r.interval.Seconds())
+	} else {
+		lat, lon = move(lat, lon, heading, state.Speed, r.interval.Seconds())
 	}
-	lat, lon = move(lat, lon, heading, state.Speed, r.interval.Seconds())
 	if state.Mode == "target" && state.TargetLatitude != nil && state.TargetLongitude != nil && distance(lat, lon, *state.TargetLatitude, *state.TargetLongitude) < 8 {
 		lat = *state.TargetLatitude
 		lon = *state.TargetLongitude
@@ -415,6 +431,11 @@ func (r *SimulationRuntime) tickOnce(id int64) error {
 		current.Heading = heading
 		current.Speed = state.Speed
 		current.LastTick = updated.UpdatedAt
+		current.routeIndex = state.routeIndex
+		current.waypointIndex = state.waypointIndex
+		current.routeDirection = state.routeDirection
+		current.routeReady = state.routeReady
+		current.routeSeedPending = state.routeSeedPending
 	}
 	r.mu.Unlock()
 	for _, d := range r.dispatchers {
@@ -467,4 +488,58 @@ func bearing(lat, lon, tlat, tlon float64) float64 {
 	x := math.Cos(a)*math.Sin(b) - math.Sin(a)*math.Cos(b)*math.Cos(dl)
 	return math.Mod(math.Atan2(y, x)*180/math.Pi+360, 360)
 }
-func autoHeading(id int64, t time.Time) float64 { return math.Mod(float64((id*47)+t.Unix()/18), 360) }
+func fleetSpeed(id int64) float64 { return 24 + float64((id*17)%43) }
+
+func prepareAutoRoute(state *SimulationState, id int64, lat, lon float64) {
+	if state.routeReady {
+		return
+	}
+	state.DeviceID = id
+	state.routeIndex = int((id*37 + id/5) % int64(len(forestryRoutes)))
+	state.routeDirection = 1
+	if id%2 == 0 {
+		state.routeDirection = -1
+	}
+	route := forestryRoutes[state.routeIndex]
+	nearest, nearestDistance := 0, math.MaxFloat64
+	for i, point := range route {
+		if d := distance(lat, lon, point.latitude, point.longitude); d < nearestDistance {
+			nearest, nearestDistance = i, d
+		}
+	}
+	state.waypointIndex = nearest
+	state.routeReady = true
+	state.routeSeedPending = true
+}
+
+func moveOnAutoRoute(state *SimulationState, lat, lon, speed, seconds float64) (float64, float64, float64) {
+	route := forestryRoutes[state.routeIndex]
+	if state.routeSeedPending {
+		segment := int((state.DeviceID*13 + int64(state.routeIndex)*7) % int64(len(route)))
+		next := (segment + 1) % len(route)
+		fraction := 0.15 + float64((state.DeviceID*29)%70)/100
+		lat = route[segment].latitude + (route[next].latitude-route[segment].latitude)*fraction
+		lon = route[segment].longitude + (route[next].longitude-route[segment].longitude)*fraction
+		if state.routeDirection > 0 {
+			state.waypointIndex = next
+		} else {
+			state.waypointIndex = segment
+		}
+		state.routeSeedPending = false
+	}
+	target := route[state.waypointIndex]
+	stepDistance := speed * 1000 / 3600 * seconds
+	remaining := distance(lat, lon, target.latitude, target.longitude)
+	if remaining <= math.Max(8, stepDistance*1.2) {
+		lat, lon = target.latitude, target.longitude
+		state.waypointIndex = (state.waypointIndex + state.routeDirection + len(route)) % len(route)
+		target = route[state.waypointIndex]
+		remaining = distance(lat, lon, target.latitude, target.longitude)
+	}
+	heading := bearing(lat, lon, target.latitude, target.longitude)
+	if remaining <= stepDistance {
+		return target.latitude, target.longitude, heading
+	}
+	lat, lon = move(lat, lon, heading, speed, seconds)
+	return lat, lon, heading
+}
