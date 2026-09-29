@@ -3,7 +3,7 @@
   import { Map as MapLibreMap, Marker, NavigationControl } from 'maplibre-gl';
   import type { GeoJSONSource } from 'maplibre-gl';
   import 'maplibre-gl/dist/maplibre-gl.css';
-  import { forestryStyle, installForestryContext } from './lib/live/mapstyle';
+  import { forestryStyle } from './lib/live/mapstyle';
   import { FORESTRY_BOUNDS, FORESTRY_ROUTES, worldFacilities, worldLabels } from './lib/live/world';
   type Health = { revision: string; database_configured: boolean; database_ready: boolean };
   type Device = { id:number; name:string; imei:string; model:string; status:'online'|'offline'; latitude:number; longitude:number; speed:number; heading:number; ignition:boolean; updated_at:string };
@@ -122,7 +122,7 @@
     const map=new MapLibreMap({container:mapContainer,style:forestryStyle(),bounds:FORESTRY_BOUNDS,fitBoundsOptions:{padding:24},attributionControl:false,maxBounds:FORESTRY_BOUNDS});
     map.addControl(new NavigationControl({showCompass:true}),'top-right');
     map.on('error',(event)=>{console.error('Live map error',event.error);message='Live map context failed to load'});
-    map.on('load',()=>{installForestryContext(map);addContextMarkers(map);map.resize();map.fitBounds(FORESTRY_BOUNDS,{padding:36,duration:0});if(selected)animateMarker(selected)});
+    map.on('load',()=>{addContextMarkers(map);map.resize();map.fitBounds(FORESTRY_BOUNDS,{padding:36,duration:0});if(selected)animateMarker(selected)});
     map.on('click',(event)=>{if(!selected)return;const control=controlFor(selected);if(control.mode!=='target')return;setControl(selected,{target:{latitude:event.lngLat.lat,longitude:event.lngLat.lng},heading:headingBetween([selected.longitude,selected.latitude],[event.lngLat.lng,event.lngLat.lat]),preset:undefined});message=`Target set for ${selected.name}`});
     liveMap=map;
   }
