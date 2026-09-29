@@ -9,7 +9,7 @@ import (
 
 func TestServerRuntimeContinuesWithoutBrowser(t *testing.T) {
 	s := &fakeStore{items: []Device{{ID: 1, Name: "Truck", IMEI: "352093081234567", Latitude: -2.985, Longitude: 104.785, UpdatedAt: time.Now()}}}
-	f := &fakeForwarder{}
+	f := &signalingForwarder{forwarded: make(chan struct{}, 8)}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	r := NewSimulationRuntime(ctx, s, 10*time.Millisecond, f)
@@ -17,13 +17,17 @@ func TestServerRuntimeContinuesWithoutBrowser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(35 * time.Millisecond)
+	deadline := time.After(time.Second)
+	for forwarded := 0; forwarded < 2; forwarded++ {
+		select {
+		case <-f.forwarded:
+		case <-deadline:
+			t.Fatalf("forwarded=%d want at least 2", forwarded)
+		}
+	}
 	state := r.State(1)
 	if !state.Running || state.LastTick.IsZero() {
 		t.Fatalf("state=%+v", state)
-	}
-	if len(f.devices) < 2 {
-		t.Fatalf("forwarded=%d", len(f.devices))
 	}
 	before := s.items[0].Longitude
 	time.Sleep(20 * time.Millisecond)
@@ -31,6 +35,15 @@ func TestServerRuntimeContinuesWithoutBrowser(t *testing.T) {
 		t.Fatal("runtime stopped progressing without UI requests")
 	}
 	_, _ = r.Apply(1, SimulationControl{Action: "stop"})
+}
+
+type signalingForwarder struct {
+	forwarded chan struct{}
+}
+
+func (f *signalingForwarder) ForwardTelemetry(context.Context, Device) error {
+	f.forwarded <- struct{}{}
+	return nil
 }
 
 type namedFakeForwarder struct{ fakeForwarder }
