@@ -11,7 +11,10 @@ passes every simulator setting in the environment (`SIM_*`, `TELTONIKA_*`, `DATA
 API through a mode-0600 file in the project state directory. The ports default to 8080 (API) and
 5173 (web), which collide with hexa-ai's Dev plane; set `SIM_DEV_API_PORT` and `SIM_DEV_WEB_PORT`
 to move them. Keep the settings in a protected file outside the repository and load it before
-`dev start`:
+`dev start`. Hexa.Build refuses to pass secret-like names (`*PASSWORD*`, `*TOKEN*`, `*SECRET*`, …)
+through `.hexa/project.yaml`, so the admin password, security key and broker password reach the
+Dev plane only when the adapter is started from this shell; Runtime reads them from its protected
+`runtime.env`:
 
 ~~~bash
 set -a; . ~/somewhere-safe/hexa-simulator-dev.env; set +a
