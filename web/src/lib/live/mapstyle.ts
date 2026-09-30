@@ -1,5 +1,7 @@
 import { setWorkerUrl, type ExpressionSpecification, type StyleSpecification } from 'maplibre-gl';
-import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url';
+// ?worker bundles the worker with its ./maplibre-gl-shared.mjs import; a plain ?url copies the file
+// alone and the Runtime build then 404s on the shared chunk, so no GeoJSON layer ever draws.
+import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import { STATE_COLOURS } from '../fleet/types';
 import type { World } from './world';
 

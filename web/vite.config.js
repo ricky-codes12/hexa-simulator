@@ -6,6 +6,8 @@ const webPort = Number(process.env.VITE_PORT || 5173);
 
 export default defineConfig({
   plugins: [svelte()],
+  // MapLibre starts its worker with { type: 'module' }.
+  worker: { format: 'es' },
   server: {
     host: '127.0.0.1',
     port: webPort,
