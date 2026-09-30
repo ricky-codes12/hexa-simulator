@@ -3,80 +3,98 @@
 ## Shape
 
 ~~~text
-web/                    Svelte 5 + Vite frontend
-cmd/api/                Go process entry point
-internal/httpapi/       HTTP/API and static-web boundary
-internal/postgresstore/ PostgreSQL adapter behind a small interface
-db/migrations/          project-owned schema migrations
-scripts/                setup, migration and canonical verification
-.hexa/project           Hexa.Build Dev + Runtime lifecycle adapter
+web/                     Svelte 5 + Vite console (Live Map, Fleet and Device panels)
+cmd/api/                 Go process: serve, health, version, sensor-onboard
+internal/world/          Hexa.Sensor's forestry world: estates, blocks, fences, roads, routing
+internal/fleet/          Device profiles (kinds), roster from a composition and seed, itineraries
+internal/scenario/       Behaviours and scenario timelines
+internal/telemetry/      The record every output encodes (telemetry-v1 shaped)
+internal/httpapi/        HTTP API, the fleet runtime (clock, behaviours, output dispatch), export
+internal/mqttout/        MQTT 3.1.1 QoS 1 publisher
+internal/teltonika/      Teltonika TCP client and Codec 8/8E encoder
+internal/sensorpush/     Hexa.Sensor http-push client
+internal/postgresstore/  PostgreSQL adapter
+db/migrations/           project-owned schema migrations
+.hexa/project            Hexa.Build Dev + Runtime lifecycle adapter
 ~~~
 
 ## Invariants
 
-- Browser code talks to the application through /api; it never receives database credentials.
-- PostgreSQL is an external persistent dependency. Runtime release roots remain immutable.
-- Domain/application behavior should move into explicit internal packages as the product grows; do not turn HTTP handlers or database rows into the domain model by default.
-- Canonical verification is ./scripts/verify.sh; CI and Hexa.Build call it rather than duplicating test policy.
+- Browser code talks to the application through /api; it never receives database credentials or
+  output secrets.
+- PostgreSQL is an external persistent dependency. Runtime release roots remain immutable, and
+  migrations are applied explicitly (`scripts/migrate.sh`); the API checks the schema at startup
+  and names the migration it misses instead of migrating.
+- Hexa.Sensor owns the world. `internal/world` mirrors its seeded world revision (`world.Revision`);
+  when Sensor moves its world, this package moves with it.
+- The contract with Sensor is the wire: telemetry-v1 JSON, Teltonika Codec 8/8E, and Sensor's
+  public admin API for onboarding. Nothing depends on Sensor's internals.
+- Canonical verification is ./scripts/verify.sh; CI and Hexa.Build call it rather than duplicating
+  test policy.
 - /healthz remains cheap and reports database configuration/readiness separately.
-- Svelte code uses Svelte 5 conventions. New event handlers use event properties such as onclick/onsubmit, not legacy on: directives.
-- Generated code has no runtime dependency on Hexa.Build.
+- Svelte code uses Svelte 5 conventions. New event handlers use event properties such as
+  onclick/onsubmit, not legacy on: directives.
 
-## Device simulator MVP
+## Fleet runtime
 
-The product model is `Device`, persisted in PostgreSQL and exposed through `/api/devices`. The Go API owns the demo simulation clock. Starting a device emits a telemetry update immediately and the server continues the three-second runtime loop independently of whether the browser remains open. Browser reloads reconnect to the persisted device/runtime state rather than owning the clock. Stopping it persists an offline sample with speed zero. Devices can also be deleted through the API/UI.
+The Go API owns the simulation clock; browsers only observe and steer it. `SimulationRuntime`
+(`internal/httpapi/simulation.go`) steps every unit once a second:
 
-Telemetry follows one of two deterministic synthetic forestry haul routes selected from the device ID. The routes stay inside the same South Sumatra demo bounds used by Hexa.Sensor (`104.688,-3.042` to `104.905,-2.928`), so pushed telemetry remains visible in the Sensor demo world instead of landing outside its constrained map. This makes demonstrations repeatable instead of using random coordinate drift. The Go API continues to validate status, latitude, longitude, speed, and heading before persisting the latest sample.
+1. **Motion.** A unit follows its itinerary (`internal/fleet`): a repeating day of drives along
+   paths (with acceleration and braking) and stops, built deterministically from its kind, its
+   number and the seed. The itinerary is a pure function of the unit's clock, so a restart resumes
+   from the persisted clock and Reset to T0 sets every clock back to its seeded phase.
+   Behaviours override it: `park` and `idle` hold the unit; a hand-driven unit (manual or target
+   mode) leaves it; a `geofence-exit` or `work` behaviour runs a detour (out of the operating area
+   and back, or to a compartment over the haul roads and lane work inside it) while the itinerary
+   clock waits; `overspeed` runs the clock faster so the unit covers the distance its speed claims.
+2. **Signals.** An electrical model gives vehicle voltage (24 V or 12 V systems, charging with the
+   engine on), the tracker's battery (draining during a `power-cut`), GSM by location, GNSS status
+   and an odometer from the distance moved.
+3. **Reports.** When a unit's report is due (`SIM_REPORT_INTERVAL`, or a `park` heartbeat), the
+   runtime builds one record with the attributes the kind's profile lists, applies the sending
+   behaviours (`signal-loss` sends nothing, `intermittent` drops a share or holds records for a
+   burst) and hands the result to the unit's output only.
+4. **Persistence.** The latest state of every unit that reported is written in one statement per
+   step, including its itinerary clock.
 
-The device detail view uses MapLibre GL with fully local GeoJSON context: the map starts with a minimal background style, then installs the committed estate, haul-road and facility GeoJSON sources/layers after MapLibre's `load` event. This explicit lifecycle keeps synthetic source loading observable and avoids coupling local context hydration to initial style parsing. Labels remain local HTML markers. No tile provider, map API key, or runtime map service is required. The selected device is rendered as a heading-aware marker. Backend/browser telemetry cadence remains approximately three seconds, while `requestAnimationFrame` interpolation eases the marker between accepted samples and interpolates heading over the shortest turn. The trail is built only from accepted device telemetry points; animation does not manufacture additional persisted telemetry.
+Behaviours are stored with absolute start and end times (`sim_behaviours`), so a restart keeps
+them. A scenario timeline (`internal/scenario`) is a list of offsets, behaviours and targets; the
+runtime gives each event's behaviour to its target when its time comes, and the running timeline is
+stored in `sim_fleet` with the fleet's T0.
 
-The Live Map fetches the complete persisted fleet independently from the paginated Device Explorer and renders it as a GPU-backed MapLibre GeoJSON circle layer. The source is refreshed on the existing approximately three-second observer cadence, so all 350 server-owned dummy devices visibly advance together without creating 350 DOM markers or moving simulation ownership into the browser. The selected device keeps its dedicated interpolated heading-aware marker and trail above the fleet layer.
+## Outputs
 
-The simulator now has an optional backend Teltonika TCP output boundary. When `TELTONIKA_GATEWAY_ADDR` is configured, each online application telemetry update is also encoded as a single-record Codec 8 Extended (`0x8E`) AVL packet. The adapter performs the Teltonika TCP IMEI handshake, validates the one-byte IMEI acceptance response, sends the AVL packet with CRC-16/IBM, and requires a four-byte acknowledgement accepting exactly one record. Gateway connection failures are returned as HTTP 502 so integration failures are visible during a demo rather than silently ignored.
+Each device has one output setting: `mqtt`, `teltonika`, `http-push`, `all` (every configured
+output, for protocol testing) or `none`. Each configured output has a bounded queue and its own
+batching:
 
-The gateway address and timeout are external configuration (`TELTONIKA_GATEWAY_ADDR`, `TELTONIKA_GATEWAY_TIMEOUT`); no downstream address or credential is committed. With no gateway address configured, standalone simulator behavior is unchanged. The adapter keeps an independent persistent TCP session per IMEI and reconnects that device session after transport failure; different IMEIs are not serialized behind one process-wide network lock. This does **not** claim an APSS Tensor application contract, UDP support, or every Teltonika IO element. The current wire contract is the documented Teltonika TCP + Codec 8 Extended subset needed to expose simulator GPS, speed, heading, timestamp, and ignition telemetry to a compatible Gateway.
+| Output | Delivery |
+| --- | --- |
+| MQTT | One broker connection with username and password, QoS 1 with PUBACK; one message per device report on the topic template (`{imei}/data` by default); a burst as `{"records": [...]}`. Keep-alive pings when idle; a refused login is reported in words |
+| Teltonika TCP | One persistent session per IMEI, as each tracker has; Codec 8E (default) or 8; up to 50 records per packet, each packet acknowledged with its count. An IMEI Sensor refuses waits 20 s before it tries again |
+| HTTP push | Records of many devices in one `{"records": [...]}` request (up to 200), Bearer ingest key; Sensor's per-record rejections (`unknown_device`) are handed back to their devices |
 
+A slow or failing output only fills its own queue; the clock never waits for it. The console shows
+per output how many records were sent, rejected (the device is not registered) and failed.
 
+## Onboarding export
 
-## HEXA.SENSOR HTTP Push integration
-
-The application integration is push-based:
-
-~~~text
-hexa-simulator -> HTTP POST + Bearer ingest key -> HEXA.SENSOR HTTP Push connector
-~~~
-
-For each persisted **online** telemetry update, hexa-simulator can POST one `hexa.sensor/telemetry/v1` record to `SIM_SENSOR_PUSH_URL`. The virtual device IMEI maps to `device.hardware_id`; persisted timestamp maps to `device_time`; latitude, longitude, speed and heading map to `position`; and ignition plus derived movement (`speed > 0`) map to `attributes`. `position.fix_valid` is true for the simulator's validated deterministic route samples.
-
-`SIM_SENSOR_PUSH_URL` and `SIM_SENSOR_PUSH_KEY` must be configured together in protected environment configuration. The key is sent only as `Authorization: Bearer <key>` and is never committed. `SIM_SENSOR_PUSH_TIMEOUT` defaults to five seconds. Non-2xx responses, network errors and timeouts are surfaced through the telemetry API as forwarding failures so a broken demo integration is visible.
-
-When HTTP Push configuration is absent, standalone simulator behavior is unchanged. Optional Teltonika TCP output through `TELTONIKA_GATEWAY_ADDR` remains an independent protocol-testing feature and may be enabled alongside HTTP Push.
+`/api/fleet/sensor-onboarding.zip` (optionally filtered by kind, estate or output) holds
+`00_device_types.json` (one Sensor device type per kind and transport, because a Sensor device type
+reads one plugin) and Sensor's four CSV imports. Assignments start at a fixed date for seeded units,
+so importing again changes nothing. `hexa-simulator sensor-onboard` applies the package through
+Sensor's admin API and can create Sensor's three sources.
 
 ## Simulator authentication and MFA enrollment
 
-Simulator access uses server-side sessions and requires TOTP enrollment before an authenticated account can use simulator or administration APIs. Password verification is the first sign-in step. Accounts with MFA already enabled receive an explicit MFA challenge before a session is created. Accounts without MFA receive a restricted session that may access only authentication and MFA-enrollment endpoints until a TOTP secret is verified.
+Simulator access uses server-side sessions and requires TOTP enrollment before an authenticated
+account can use simulator or administration APIs. Password verification is the first sign-in step.
+Accounts with MFA already enabled receive an explicit MFA challenge before a session is created.
+Accounts without MFA receive a restricted session that may access only authentication and
+MFA-enrollment endpoints until a TOTP secret is verified.
 
-The enrollment UI renders the backend-issued `otpauth://` URI as a local QR code in the browser and also exposes the setup key as a fallback. The QR image is generated client-side; the TOTP secret is not sent to any third-party QR service. After successful verification, recovery codes are shown once and normal simulator access is enabled. Subsequent sign-ins require the authenticator or a recovery code.
-
-## Server-side multi-protocol simulation runtime
-
-Simulation progression is owned by the Go API, not by a browser timer. `POST /api/devices/{id}/simulation` changes start/pause/resume/stop and drive controls; the runtime ticks approximately every three seconds, persists current telemetry, and fans each online record to configured outputs. Reopening the UI only observes and controls this state, so it must not create a second simulation loop.
-
-Output adapters are optional and environment-owned: existing Hexa.Sensor HTTP Push, persistent per-IMEI Teltonika Direct TCP with Codec 8 or 8E and acknowledgement/reconnect, and MQTT 3.1.1 QoS 1 publish using the `hexa.sensor/telemetry/v1` JSON contract. MQTT credentials and Sensor keys remain protected Runtime configuration and must never be committed or returned to the browser. Teltonika/Sitepat cloud mocks are intentionally out of scope until authoritative vendor API contracts exist.
-
-
-## Concurrent demo fleet startup
-
-After PostgreSQL demo-fleet provisioning completes, the API restores the complete persisted fleet into the server-owned runtime. Each device has exactly one cancellable loop. The loops are started with deterministic phase offsets spread across one telemetry interval, preventing all 350 devices from writing and forwarding on the same instant while preserving an approximately three-second cadence per device. Browser sessions are observers/controllers only; they are not required for any fleet clock. Per-device stop/pause/start semantics remain authoritative after startup. `StartFleet` uses an initial-tick completion barrier: it returns only after every newly created worker has persisted its phased first telemetry sample (or returns the first startup error). This makes 350-device readiness deterministic without collapsing regular telemetry into a thundering herd.
-
-## Fleet-scale output isolation
-
-The server-owned simulation clock is intentionally isolated from downstream protocol latency. Each configured output has a bounded 700-item queue and 16 workers. A telemetry tick persists the device update first and then performs a non-blocking enqueue per output. If a downstream path is unavailable long enough to fill its queue, that output reports an error for the affected device instead of stalling the simulation loop or creating unbounded goroutines. This keeps the 350-device runtime authoritative even during broker/listener outages.
-
-MQTT publishes the canonical `hexa.sensor/telemetry/v1` envelope expected by Hexa.Sensor: `device.hardware_id`, `device_time`, normalized `position` fields (`fix_valid`, `lat`, `lon`, `speed_kmh`, `heading_deg`), and ignition/movement attributes. QoS 1 acknowledgement remains required.
-
-Teltonika Direct keeps one persistent TCP session per IMEI and synchronizes only that device session. Different virtual devices may therefore connect/send concurrently; a slow or reconnecting tracker no longer serializes every other IMEI behind a process-wide network lock. Codec 8/8E handshake, CRC and one-record AVL acknowledgement requirements remain unchanged.
-
-## Demo transmission observability
-
-The server-owned runtime keeps a bounded, in-memory transmission history for each virtual device. Each configured output attempt records output name, success/error, latency and the telemetry position/speed/heading summary. The browser reads this through `/api/devices/{id}/transmissions` and may clear only that device's in-memory history. The history is intentionally capped at 100 entries per device and is not persistent audit storage; process restart clears it. Secrets, broker URLs, gateway addresses and bearer keys are never included in this API.
+The enrollment UI renders the backend-issued `otpauth://` URI as a local QR code in the browser and
+also exposes the setup key as a fallback. The QR image is generated client-side; the TOTP secret is
+not sent to any third-party QR service. After successful verification, recovery codes are shown
+once and normal simulator access is enabled.

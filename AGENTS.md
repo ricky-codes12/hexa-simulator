@@ -25,6 +25,8 @@ proof, immutable Runtime orchestration, and qualified release operations.
 5. docs/engineering/DELIVERY.md
 6. .hexa/project.yaml
 7. .hexa/project
+8. docs/architecture/ARCHITECTURE.md
+9. docs/FLEET.md (the fleet, wiring Hexa.Sensor, plan status)
 
 Add project-specific architecture, decisions, state, handoff, and validation
 documents to this list as the project matures.
